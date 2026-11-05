@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*"],
+  // src/test.ts ships as source: its import.meta.glob must be rewritten by the
+  // consumer's bundler.
+  "exclude": ["src/**/*.test.*", "./src/test.ts"]
+}

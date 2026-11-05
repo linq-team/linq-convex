@@ -1,0 +1,75 @@
+{
+  "name": "@linqapp/convex",
+  "version": "0.1.0",
+  "description": "Convex component for Linq: receive and send iMessage, RCS and SMS with durable webhooks, turns and a retrying outbox.",
+  "repository": "github:linq-team/linq-convex",
+  "homepage": "https://github.com/linq-team/linq-convex#readme",
+  "license": "Apache-2.0",
+  "author": "Linq <support@linq.com>",
+  "keywords": [
+    "convex",
+    "component",
+    "linq",
+    "imessage",
+    "rcs",
+    "sms",
+    "chatbot",
+    "agent"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "convex dev --typecheck-components --start \"npm run dev:build\"",
+    "dev:build": "chokidar \"tsconfig*.json\" \"src/**/*.ts\" -i \"**/*.test.ts\" -c \"npm run build:codegen\" --initial",
+    "build": "tsc --project ./tsconfig.build.json",
+    "build:codegen": "convex codegen --component-dir ./src/component && npm run build",
+    "build:clean": "rm -rf dist *.tsbuildinfo && npm run build:codegen",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json && tsc -p example/convex",
+    "test": "vitest run",
+    "prepare": "npm run build"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./test": "./src/test.ts",
+    "./_generated/component.js": {
+      "types": "./dist/component/_generated/component.d.ts"
+    },
+    "./_generated/component": {
+      "types": "./dist/component/_generated/component.d.ts"
+    },
+    "./convex.config.js": {
+      "types": "./dist/component/convex.config.d.ts",
+      "default": "./dist/component/convex.config.js"
+    },
+    "./convex.config": {
+      "types": "./dist/component/convex.config.d.ts",
+      "default": "./dist/component/convex.config.js"
+    }
+  },
+  "types": "./dist/client/index.d.ts",
+  "module": "./dist/client/index.js",
+  "dependencies": {
+    "@linqapp/sdk": "^0.78.0",
+    "standardwebhooks": "^1.1.1"
+  },
+  "peerDependencies": {
+    "convex": "^1.44.0"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@types/node": "^26.6.6",
+    "chokidar-cli": "^3.0.0",
+    "convex": "^1.48.0",
+    "convex-test": "^0.0.67",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5",
+    "vitest": "^4.1.12"
+  }
+}
