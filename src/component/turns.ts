@@ -8,6 +8,7 @@ import { v } from "convex/values";
 import type { FunctionHandle } from "convex/server";
 import { internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
+import { cancelTurnSends } from "./outbox.js";
 import {
   internalAction,
   internalMutation,
@@ -59,18 +60,7 @@ export async function interruptRunningTurn(ctx: MutationCtx, chatId: string): Pr
   for (const turn of running) {
     await ctx.db.patch("turns", turn._id, { status: "interrupted", endedAt: Date.now() });
 
-    let answered = false;
-    const sends = await ctx.db
-      .query("outbox")
-      .withIndex("by_turnId", (q) => q.eq("turnId", turn._id))
-      .collect();
-    for (const send of sends) {
-      if (send.status === "queued") {
-        await ctx.db.patch("outbox", send._id, { status: "cancelled" });
-      } else if (send.kind === "message" && (send.status === "sent" || send.status === "sending")) {
-        answered = true;
-      }
-    }
+    const answered = await cancelTurnSends(ctx, turn._id);
 
     const messages = await ctx.db
       .query("messages")

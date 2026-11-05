@@ -147,6 +147,11 @@ turn queues after that point are dropped. If the turn had not replied yet, its m
 turn, so nothing goes unanswered. A running action cannot be stopped from outside, so check
 `linq.isInterrupted(ctx, { turnId })` before doing slow work.
 
+The dispatch boundary is transactional. An interruption cancels a pending send before any HTTP
+attempt starts and carries its unanswered messages into the next turn. Once a send has crossed
+that boundary, it may already have reached Linq; the component lets it finish or retry with the
+same idempotency key instead of cancelling an uncertain delivery and replying twice.
+
 ## Send
 
 ```ts

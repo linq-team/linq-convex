@@ -134,6 +134,8 @@ export default defineSchema({
     /** Fences late results from an attempt that a recovery job replaced. */
     generation: v.optional(v.number()),
     recoveryJob: v.optional(v.id("_scheduled_functions")),
+    /** Set atomically before the first HTTP attempt; its outcome may be unknown. */
+    dispatchedAt: v.optional(v.number()),
   })
     .index("by_lane_and_status", ["lane", "status"])
     .index("by_turnId", ["turnId"])
