@@ -17,6 +17,7 @@ import {
   query,
 } from "./_generated/server.js";
 import { deliveryStatus, sendKind, sendStatus } from "./schema.js";
+import { receiptForMessage } from "./delivery.js";
 import { linqRequest, REQUEST_TIMEOUT_MS, RETRY_DELAYS_MS, type CallResult } from "./transport.js";
 
 // A durable mutation recovers a worker that exits without settling its row.
@@ -265,7 +266,7 @@ export const settle = internalMutation({
         lastError: undefined,
         job: undefined,
         recoveryJob: undefined,
-        ...(args.messageId ? { messageId: args.messageId, delivery: "sent" as const } : {}),
+        ...(args.messageId ? { messageId: args.messageId, ...await receiptForMessage(ctx, args.messageId) } : {}),
         ...(args.chatId && !row.chatId ? { chatId: args.chatId } : {}),
       });
       if (args.chatId && !row.chatId) {

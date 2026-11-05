@@ -35,12 +35,12 @@ export const DELIVERY_EVENTS = {
 
 export type DeliveryStatus = (typeof DELIVERY_EVENTS)[keyof typeof DELIVERY_EVENTS];
 
-/** Later states win; a late `delivered` must not overwrite `read`. */
+/** Delivery/read evidence supersedes failure; Linq can deliver after failing. */
 const DELIVERY_RANK: Record<DeliveryStatus, number> = {
   sent: 0,
-  delivered: 1,
-  read: 2,
-  failed: 3,
+  failed: 1,
+  delivered: 2,
+  read: 3,
 };
 
 export function deliveryAdvances(

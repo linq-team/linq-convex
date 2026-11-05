@@ -329,3 +329,47 @@ describe("interruption dispatch boundary", () => {
     expect(calls.map(c => c.body.message.parts[0].value)).toEqual(["echo: first / second"]);
   });
 });
+
+describe("delivery reconciliation", () => {
+  test("a late failure cannot replace read evidence", async () => {
+    const t = createTest();
+    const queued = await t.mutation(api.outbound.send, { text: "read already" });
+    await settle(t);
+    const { messageId } = (await linq.getSend(t as any, { id: queued.id }))!;
+    await deliver(t, "message.read", { id: messageId });
+    await deliver(t, "message.failed", { message_id: messageId, code: 4001, reason: "stale failure" });
+    const send = await linq.getSend(t as any, { id: queued.id });
+    expect(send).toMatchObject({ delivery: "read" });
+    expect(send?.error).toBeUndefined();
+  });
+  test("retains a receipt that arrives before the send HTTP response", async () => {
+    const t = createTest();
+    let releaseFetch!: (response: Response) => void;
+    let notifyStarted!: () => void;
+    const started = new Promise<void>(resolve => { notifyStarted = resolve; });
+    vi.stubGlobal("fetch", () => new Promise<Response>(resolve => {
+      releaseFetch = resolve;
+      notifyStarted();
+    }));
+    const queued = await t.mutation(api.outbound.send, { text: "race" });
+    const settling = settle(t);
+    await started;
+    await t.mutation(app.components.linq.inbound.ingest, {
+      eventId: "early-read",
+      event: { event_type: "message.read", data: { id: "out-early", chat: { id: "chat-new" } } },
+    });
+    releaseFetch(Response.json({ chat: { id: "chat-new", message: { id: "out-early" } } }));
+    await settling;
+    expect(await linq.getSend(t as any, { id: queued.id })).toMatchObject({ delivery: "read" });
+  });
+  test("accepts successful delivery after a failure notification", async () => {
+    const t = createTest();
+    const queued = await t.mutation(api.outbound.send, { text: "eventual delivery" });
+    await settle(t);
+    const { messageId } = (await linq.getSend(t as any, { id: queued.id }))!;
+    await deliver(t, "message.failed", { message_id: messageId, chat_id: "chat-new", code: 4001, reason: "temporary" });
+    await deliver(t, "message.delivered", { id: messageId, chat: { id: "chat-new" } });
+    expect(await linq.getSend(t as any, { id: queued.id })).toMatchObject({ delivery: "delivered" });
+    expect((await linq.getSend(t as any, { id: queued.id }))?.error).toBeUndefined();
+  });
+});

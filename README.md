@@ -189,6 +189,10 @@ export const sendStatus = query({
 `status` tracks the API call (`queued`, `sending`, `sent`, `failed`, `cancelled`). `delivery` tracks
 what Linq reported afterwards (`sent`, `delivered`, `read`, `failed`) and never moves backwards.
 
+Receipts are retained even if they arrive before the send's HTTP response. Delivery or read
+evidence supersedes a failure notification, since Linq can still deliver a message after reporting
+a failure. A late failure cannot replace a delivered/read state.
+
 Transient failures (network errors, 408, 425, 429 and 5xx) are retried after 2 s, 10 s, 30 s, 2 min
 and 10 min, honoring `Retry-After`. Other 4xx responses fail the send immediately, and the error is
 recorded. Either way the chat's next send proceeds.
@@ -217,7 +221,7 @@ new Linq(components.linq, { onMessage: internal.bot.reply, onEvent: internal.bot
 | `linq.getChat(ctx, { chatId })`             | Line, group flag, last inbound time           |
 | `linq.listLines(ctx)`                       | Lines this API key can send from (action)     |
 
-The component's tables (`events`, `chats`, `messages`, `turns`, `outbox`) are visible under the
+The component's tables (`events`, `receipts`, `chats`, `messages`, `turns`, `outbox`) are visible under the
 component dropdown in the Convex dashboard.
 
 ## Testing your app

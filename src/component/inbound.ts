@@ -9,13 +9,13 @@ import type { FunctionHandle } from "convex/server";
 import { mutation, query } from "./_generated/server.js";
 import {
   DELIVERY_EVENTS,
-  deliveryAdvances,
   deliveryError,
   deliveryMessageId,
   parseInboundMessage,
 } from "../shared/events.js";
 import { interruptRunningTurn, scheduleTurn } from "./turns.js";
 import { inboundStatus } from "./schema.js";
+import { recordDelivery } from "./delivery.js";
 
 export const ingest = mutation({
   args: {
@@ -84,16 +84,7 @@ export const ingest = mutation({
       const status = DELIVERY_EVENTS[eventType as keyof typeof DELIVERY_EVENTS];
       const messageId = deliveryMessageId(eventType, data);
       if (messageId) {
-        const send = await ctx.db
-          .query("outbox")
-          .withIndex("by_messageId", (q) => q.eq("messageId", messageId))
-          .first();
-        if (send && deliveryAdvances(send.delivery, status)) {
-          await ctx.db.patch("outbox", send._id, {
-            delivery: status,
-            ...(status === "failed" ? { deliveryError: deliveryError(data) } : {}),
-          });
-        }
+        await recordDelivery(ctx, messageId, status, deliveryError(data));
       }
     }
 
