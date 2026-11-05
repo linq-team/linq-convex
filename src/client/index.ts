@@ -95,13 +95,13 @@ type RunActionCtx = ActionCtx;
 
 type Queued = FunctionReturnType<ComponentApi["outbox"]["enqueue"]>;
 
-/** Where a message goes: a known chat, or a line and recipients. */
+/** Where a message goes: a known chat, or recipients with an optional fixed line. */
 export type Destination =
   | { chatId: string; from?: never; to?: never }
   | {
       chatId?: never;
-      /** Your Linq line, E.164. */
-      from: string;
+      /** Pin a Linq line, or omit to let Linq select one and resolve the chat. */
+      from?: string;
       /** Recipient handles; more than one starts a group chat. */
       to: string[];
     };

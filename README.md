@@ -160,10 +160,16 @@ await linq.sendMessage(ctx, { chatId, text: "your order shipped" });
 
 // Start a conversation (or reuse the existing chat with these recipients)
 const { id } = await linq.sendMessage(ctx, {
-  from: "+18885550123",
   to: ["+15551234567"],
   text: "hi! following up on your order",
   idempotencyKey: `order-${orderId}-followup`, // dedupes your own retries
+});
+
+// Pin a particular provisioned line when the conversation requires it
+await linq.sendMessage(ctx, {
+  from: "+18885550123",
+  to: ["+15551234567", "+15551234568"],
+  text: "hello everyone",
 });
 
 // Full Linq message content: media, links, effects, replies
@@ -185,6 +191,12 @@ export const sendStatus = query({
   // → { status: "sent", delivery: "read", attempts: 1, messageId, chatId, error? }
 });
 ```
+
+With recipients and no `from`, the component uses `POST /v3/messages`, letting Linq select a
+sending line and reuse or create the chat. The returned chat and chosen line are saved after the
+send succeeds. An explicit `from` preserves the existing `POST /v3/chats` flow, and a `chatId`
+continues the specified conversation. One recipient is a direct conversation; multiple recipients
+create or reuse a group.
 
 `status` tracks the API call (`queued`, `sending`, `sent`, `failed`, `cancelled`). `delivery` tracks
 what Linq reported afterwards (`sent`, `delivered`, `read`, `failed`) and never moves backwards.
