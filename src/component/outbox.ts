@@ -18,7 +18,24 @@ import {
   query,
 } from "./_generated/server.js";
 import { deliveryStatus, sendKind, sendStatus } from "./schema.js";
-import { linqRequest, RETRY_DELAYS_MS, type CallResult } from "./transport.js";
+import { linqRequest, REQUEST_TIMEOUT_MS, RETRY_DELAYS_MS, type CallResult } from "./transport.js";
+
+// A durable mutation recovers a worker that exits without settling its row.
+export const ATTEMPT_LEASE_MS = REQUEST_TIMEOUT_MS + 30_000;
+
+async function cancelPending(ctx: MutationCtx, jobId?: Id<"_scheduled_functions">) {
+  if (!jobId) return;
+  const job = await ctx.db.system.get("_scheduled_functions", jobId);
+  if (job?.state.kind === "pending") await ctx.scheduler.cancel(jobId);
+}
+
+async function scheduleAttempt(ctx: MutationCtx, row: Doc<"outbox">, delay = 0) {
+  const generation = (row.generation ?? 0) + 1;
+  const args = { id: row._id, generation };
+  const job = await ctx.scheduler.runAfter(delay, internal.outbox.deliver, args);
+  const recoveryJob = await ctx.scheduler.runAfter(delay + ATTEMPT_LEASE_MS, internal.outbox.recover, args);
+  await ctx.db.patch("outbox", row._id, { status: "sending", generation, job, recoveryJob });
+}
 
 function laneFor(args: { chatId?: string; from?: string; to?: string[] }): string {
   if (args.chatId) return `chat:${args.chatId}`;
@@ -37,8 +54,7 @@ async function pump(ctx: MutationCtx, lane: string): Promise<void> {
     .withIndex("by_lane_and_status", (q) => q.eq("lane", lane).eq("status", "queued"))
     .first();
   if (!next) return;
-  const job = await ctx.scheduler.runAfter(0, internal.outbox.deliver, { id: next._id });
-  await ctx.db.patch("outbox", next._id, { status: "sending", job });
+  await scheduleAttempt(ctx, next);
 }
 
 export const enqueue = mutation({
@@ -149,19 +165,20 @@ function sentIds(body: unknown): { chatId?: string; messageId?: string } {
 }
 
 export const deliver = internalAction({
-  args: { id: v.id("outbox") },
+  args: { id: v.id("outbox"), generation: v.optional(v.number()) },
   returns: v.null(),
-  handler: async (ctx, { id }) => {
+  handler: async (ctx, { id, generation = 0 }) => {
     const loaded = await ctx.runQuery(internal.outbox.load, { id });
-    if (!loaded || loaded.row.status !== "sending") return null;
+    if (!loaded || loaded.row.status !== "sending" || (loaded.row.generation ?? 0) !== generation) return null;
     if (loaded.interrupted) {
-      await ctx.runMutation(internal.outbox.settle, { id, outcome: "cancelled" });
+      await ctx.runMutation(internal.outbox.settle, { id, generation, outcome: "cancelled" });
       return null;
     }
     const apiKey = env.LINQ_API_KEY;
     if (!apiKey) {
       await ctx.runMutation(internal.outbox.settle, {
         id,
+        generation,
         outcome: "failed",
         error: "LINQ_API_KEY is not set for the linq component (see README: Configure)",
       });
@@ -171,12 +188,14 @@ export const deliver = internalAction({
     if (result.ok) {
       await ctx.runMutation(internal.outbox.settle, {
         id,
+        generation,
         outcome: "sent",
         ...sentIds(result.body),
       });
     } else {
       await ctx.runMutation(internal.outbox.settle, {
         id,
+        generation,
         outcome: result.retryable ? "retry" : "failed",
         error: result.error,
         retryAfterMs: result.retryAfterMs,
@@ -189,6 +208,7 @@ export const deliver = internalAction({
 export const settle = internalMutation({
   args: {
     id: v.id("outbox"),
+    generation: v.optional(v.number()),
     outcome: v.union(
       v.literal("sent"),
       v.literal("retry"),
@@ -203,14 +223,15 @@ export const settle = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const row = await ctx.db.get("outbox", args.id);
-    if (!row || row.status !== "sending") return null;
+    if (!row || row.status !== "sending" || (row.generation ?? 0) !== (args.generation ?? 0)) return null;
+    await cancelPending(ctx, row.recoveryJob);
     const attempts = row.attempts + 1;
 
     if (args.outcome === "retry" && attempts <= RETRY_DELAYS_MS.length) {
       const delay = Math.max(RETRY_DELAYS_MS[attempts - 1] ?? 0, args.retryAfterMs ?? 0);
-      const job = await ctx.scheduler.runAfter(delay, internal.outbox.deliver, { id: row._id });
       // Still `sending`: the lane stays blocked so later sends keep their order.
-      await ctx.db.patch("outbox", row._id, { attempts, lastError: args.error, job });
+      await ctx.db.patch("outbox", row._id, { attempts, lastError: args.error });
+      await scheduleAttempt(ctx, row, delay);
       return null;
     }
 
@@ -221,6 +242,7 @@ export const settle = internalMutation({
         sentAt: Date.now(),
         lastError: undefined,
         job: undefined,
+        recoveryJob: undefined,
         ...(args.messageId ? { messageId: args.messageId, delivery: "sent" as const } : {}),
         ...(args.chatId && !row.chatId ? { chatId: args.chatId } : {}),
       });
@@ -237,9 +259,25 @@ export const settle = internalMutation({
         attempts,
         lastError: args.error,
         job: undefined,
+        recoveryJob: undefined,
       });
     }
     await pump(ctx, row.lane);
+    return null;
+  },
+});
+
+/** Recover even when an action is terminated before its catch/finally runs. */
+export const recover = internalMutation({
+  args: { id: v.id("outbox"), generation: v.number() },
+  returns: v.null(),
+  handler: async (ctx, args): Promise<null> => {
+    const row = await ctx.db.get("outbox", args.id);
+    if (!row || row.status !== "sending" || row.generation !== args.generation) return null;
+    await cancelPending(ctx, row.job);
+    await ctx.runMutation(internal.outbox.settle, {
+      ...args, outcome: "retry", error: "Delivery worker did not finish before its lease expired",
+    });
     return null;
   },
 });

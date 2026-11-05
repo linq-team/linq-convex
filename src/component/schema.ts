@@ -131,6 +131,9 @@ export default defineSchema({
     delivery: v.optional(deliveryStatus),
     deliveryError: v.optional(v.string()),
     job: v.optional(v.id("_scheduled_functions")),
+    /** Fences late results from an attempt that a recovery job replaced. */
+    generation: v.optional(v.number()),
+    recoveryJob: v.optional(v.id("_scheduled_functions")),
   })
     .index("by_lane_and_status", ["lane", "status"])
     .index("by_turnId", ["turnId"])
