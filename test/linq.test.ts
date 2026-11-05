@@ -124,7 +124,15 @@ async function deliver(
 }
 
 async function settle(t: ReturnType<typeof createTest>) {
-  await t.finishAllScheduledFunctions(() => vi.runAllTimers());
+  // Give each worker's promises time to settle before advancing to its lease.
+  for (let i = 0; i < 100; i++) {
+    if (vi.getTimerCount() > 0) await vi.advanceTimersToNextTimerAsync();
+    else {
+      await t.finishInProgressScheduledFunctions();
+      if (vi.getTimerCount() === 0) return;
+    }
+  }
+  throw new Error("Scheduled work did not settle");
 }
 
 beforeEach(() => {
@@ -279,5 +287,19 @@ describe("turns and outbox", () => {
     await settle(t);
     expect((await linq.getSend(t as any, { id: a.id }))!.error).toMatch(/LINQ_API_KEY/);
     expect(calls).toEqual([]);
+  });
+});
+
+describe("outbox recovery", () => {
+  test("a broken response stream retries instead of leaving the lane stuck", async () => {
+    const t = createTest();
+    responses.push(() => new Response(new ReadableStream({
+      start(controller) { controller.error(new Error("connection lost while reading response")); },
+    }), { status: 200 }));
+    const queued = await t.mutation(api.outbound.send, { text: "first" });
+    await t.mutation(api.outbound.send, { text: "second" });
+    await settle(t);
+    expect(await linq.getSend(t as any, { id: queued.id })).toMatchObject({ status: "sent" });
+    expect(calls.map(c => c.body.message.parts[0].value)).toEqual(["first", "first", "second"]);
   });
 });

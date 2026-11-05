@@ -188,6 +188,11 @@ Transient failures (network errors, 408, 425, 429 and 5xx) are retried after 2 s
 and 10 min, honoring `Retry-After`. Other 4xx responses fail the send immediately, and the error is
 recorded. Either way the chat's next send proceeds.
 
+Each HTTP attempt has a 30-second deadline, including reading the response body. A durable
+recovery job retries an attempt that has not settled after 60 seconds (for example, if its worker
+was terminated). Retries keep the same provider idempotency key; generation checks ignore late
+results from replaced attempts.
+
 ## Other events
 
 Pass `onEvent` to receive every verified webhook event, including reactions, polls, line health and
