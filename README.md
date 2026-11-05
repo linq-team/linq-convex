@@ -217,9 +217,29 @@ new Linq(components.linq, { onMessage: internal.bot.reply, onEvent: internal.bot
 | ------------------------------------------ | --------------------------------------------- |
 | `linq.listMessages(ctx, { chatId, limit })` | Inbound messages, oldest first                |
 | `linq.listSends(ctx, { chatId, limit })`    | Outbound sends with status and delivery       |
+| `linq.paginateMessages(ctx, { chatId, paginationOpts })` | Inbound history, newest receipt first |
+| `linq.paginateSends(ctx, { chatId, paginationOpts })` | Outbound history, newest queued send first |
 | `linq.getSend(ctx, { id })`                 | One send                                      |
 | `linq.getChat(ctx, { chatId })`             | Line, group flag, last inbound time           |
 | `linq.listLines(ctx)`                       | Lines this API key can send from (action)     |
+
+The `list*` methods return recent snapshots, capped at 500 items. Use cursor pagination to read
+older history or drive Convex's `usePaginatedQuery`:
+
+```ts
+import { paginationOptsValidator } from "convex/server";
+
+export const history = query({
+  args: { chatId: v.string(), paginationOpts: paginationOptsValidator },
+  handler: async (ctx, args) => {
+    // Authorize the caller's access to args.chatId here.
+    return linq.paginateMessages(ctx, args);
+  },
+});
+```
+
+Pages return `{ page, isDone, continueCursor }` and preserve Convex's additional pagination
+metadata. Paginated methods return newest-first; the existing snapshot methods stay oldest-first.
 
 The component's tables (`events`, `receipts`, `chats`, `messages`, `turns`, `outbox`) are visible under the
 component dropdown in the Convex dashboard.

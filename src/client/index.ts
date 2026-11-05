@@ -7,6 +7,7 @@ import {
   type GenericMutationCtx,
   type GenericQueryCtx,
   type HttpRouter,
+  type PaginationOptions,
   httpActionGeneric,
 } from "convex/server";
 import type { LinqAPIV3 } from "@linqapp/sdk";
@@ -226,6 +227,16 @@ export class Linq {
   /** Stored inbound messages for a chat, oldest first. */
   async listMessages(ctx: RunQueryCtx, args: { chatId: string; limit?: number }) {
     return await ctx.runQuery(this.component.inbound.listMessages, args);
+  }
+
+  /** Cursor-paginated inbound history, newest receipt first. */
+  async paginateMessages(ctx: RunQueryCtx, args: { chatId: string; paginationOpts: PaginationOptions }) {
+    return await ctx.runQuery(this.component.inbound.paginateMessages, args);
+  }
+
+  /** Cursor-paginated outbound history, newest queued send first. */
+  async paginateSends(ctx: RunQueryCtx, args: { chatId: string; paginationOpts: PaginationOptions }) {
+    return await ctx.runQuery(this.component.outbox.paginate, args);
   }
 
   async getChat(ctx: RunQueryCtx, args: { chatId: string }) {

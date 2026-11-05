@@ -6,6 +6,8 @@
 
 import { v } from "convex/values";
 import type { FunctionHandle } from "convex/server";
+import { paginationOptsValidator, paginationResultValidator } from "convex/server";
+import type { Doc } from "./_generated/dataModel.js";
 import { mutation, query } from "./_generated/server.js";
 import {
   DELIVERY_EVENTS,
@@ -97,11 +99,7 @@ export const ingest = mutation({
   },
 });
 
-/** Stored inbound messages for a chat, oldest first. */
-export const listMessages = query({
-  args: { chatId: v.string(), limit: v.optional(v.number()) },
-  returns: v.array(
-    v.object({
+const messageView = v.object({
       messageId: v.string(),
       from: v.string(),
       text: v.string(),
@@ -109,23 +107,43 @@ export const listMessages = query({
       sentAt: v.optional(v.string()),
       status: inboundStatus,
       receivedAt: v.number(),
-    }),
-  ),
+});
+
+function view(m: Doc<"messages">) {
+  return {
+    messageId: m.messageId,
+    from: m.from,
+    text: m.text,
+    service: m.service,
+    sentAt: m.sentAt,
+    status: m.status,
+    receivedAt: m._creationTime,
+  };
+}
+
+/** Stored inbound messages for a chat, oldest first. */
+export const listMessages = query({
+  args: { chatId: v.string(), limit: v.optional(v.number()) },
+  returns: v.array(messageView),
   handler: async (ctx, { chatId, limit }) => {
     const rows = await ctx.db
       .query("messages")
       .withIndex("by_chatId", (q) => q.eq("chatId", chatId))
       .order("desc")
       .take(Math.min(limit ?? 50, 500));
-    return rows.reverse().map((m) => ({
-      messageId: m.messageId,
-      from: m.from,
-      text: m.text,
-      service: m.service,
-      sentAt: m.sentAt,
-      status: m.status,
-      receivedAt: m._creationTime,
-    }));
+    return rows.reverse().map(view);
+  },
+});
+
+/** Cursor pagination by receipt order, newest first. */
+export const paginateMessages = query({
+  args: { chatId: v.string(), paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(messageView),
+  handler: async (ctx, { chatId, paginationOpts }) => {
+    const result = await ctx.db.query("messages")
+      .withIndex("by_chatId", q => q.eq("chatId", chatId))
+      .order("desc").paginate(paginationOpts);
+    return { ...result, page: result.page.map(view) };
   },
 });
 
