@@ -56,6 +56,13 @@ export default defineSchema({
     receivedAt: v.number(),
   }).index("by_eventId", ["eventId"]),
 
+  /** Receipts can arrive before the HTTP send response binds a message id. */
+  receipts: defineTable({
+    messageId: v.string(),
+    delivery: deliveryStatus,
+    error: v.optional(v.string()),
+  }).index("by_messageId", ["messageId"]),
+
   /** One row per Linq chat the deployment has seen. */
   chats: defineTable({
     chatId: v.string(),
