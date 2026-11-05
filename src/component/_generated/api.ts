@@ -8,12 +8,9 @@
  * @module
  */
 
-import type * as delivery from "../delivery.js";
-import type * as inbound from "../inbound.js";
-import type * as outbox from "../outbox.js";
+import type * as api_ from "../api.js";
 import type * as setup from "../setup.js";
 import type * as transport from "../transport.js";
-import type * as turns from "../turns.js";
 
 import type {
   ApiFromModules,
@@ -23,12 +20,9 @@ import type {
 import { anyApi, componentsGeneric } from "convex/server";
 
 const fullApi: ApiFromModules<{
-  delivery: typeof delivery;
-  inbound: typeof inbound;
-  outbox: typeof outbox;
+  api: typeof api_;
   setup: typeof setup;
   transport: typeof transport;
-  turns: typeof turns;
 }> = anyApi as any;
 
 /**
