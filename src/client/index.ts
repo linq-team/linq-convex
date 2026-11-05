@@ -1,106 +1,88 @@
 import {
-  createFunctionHandle,
   type FunctionReference,
-  type FunctionReturnType,
   type GenericActionCtx,
   type GenericDataModel,
-  type GenericMutationCtx,
-  type GenericQueryCtx,
   type HttpRouter,
-  type PaginationOptions,
   httpActionGeneric,
 } from "convex/server";
+import { v } from "convex/values";
 import type { LinqAPIV3 } from "@linqapp/sdk";
 import { Webhook } from "standardwebhooks";
 import type { ComponentApi } from "../component/_generated/component.js";
 import {
   DEFAULT_EVENTS,
+  parseInboundMessage,
   WEBHOOK_PAYLOAD_VERSION,
+  type InboundMessage,
   type LinqEventType,
   type LinqWebhookEvent,
 } from "../shared/events.js";
 
-export type { LinqWebhookEvent, LinqEventType } from "../shared/events.js";
+export type { InboundMessage, LinqEventType, LinqWebhookEvent } from "../shared/events.js";
 export { DEFAULT_EVENTS, WEBHOOK_PAYLOAD_VERSION } from "../shared/events.js";
 export type { ComponentApi } from "../component/_generated/component.js";
 
 /** Linq `MessageContent`: text, media and link parts, effects, replies. */
 export type MessageContent = Omit<LinqAPIV3.MessageContent, "idempotency_key">;
 
-/** An inbound message as a turn hands it to the app. */
-export interface TurnMessage {
-  messageId: string;
-  /** Sender handle: E.164 number or email. */
-  from: string;
-  /** Text parts joined by newlines; empty for media-only messages. */
-  text: string;
-  /** `iMessage`, `RCS` or `SMS`. */
-  service?: string;
-  sentAt?: string;
-  /** The full Linq message event, for media, links and replies. */
-  raw: LinqAPIV3.MessageEventV2;
-}
-
 /**
- * What `onMessage` is called with: every message the chat queued since its
- * last turn, oldest first.
+ * Validators for an `onMessage` handler's arguments:
+ *
+ * ```ts
+ * export const reply = internalAction({ args: onMessageArgs, handler: ... });
+ * ```
  */
-export interface Turn {
-  turnId: string;
-  chatId: string;
-  /** The Linq line (E.164) the chat runs on. */
-  line?: string;
-  isGroup?: boolean;
-  messages: TurnMessage[];
-}
+export const onMessageArgs = {
+  /** Linq's event id. A redelivery of the same event carries the same id. */
+  eventId: v.string(),
+  message: v.object({
+    messageId: v.string(),
+    chatId: v.string(),
+    isGroup: v.optional(v.boolean()),
+    line: v.optional(v.string()),
+    from: v.string(),
+    text: v.string(),
+    service: v.optional(v.string()),
+    sentAt: v.optional(v.string()),
+    reconciledAt: v.optional(v.string()),
+    zeroRetention: v.boolean(),
+  }),
+  /** The full Linq message event, for media, links and replies. */
+  raw: v.any(),
+};
+
+/** Validators for an `onEvent` handler's arguments. */
+export const onEventArgs = { eventId: v.string(), event: v.any() };
 
 export interface LinqOptions {
   /**
-   * Called once per turn, with the chat's new messages. Must be an action
-   * (usually an `internalAction`, so it can call an LLM). A chat runs one turn
-   * at a time: messages that arrive meanwhile wait for the next turn.
+   * Called with each inbound message, inside the webhook request. Must be an
+   * action. Linq waits 10 seconds for the webhook response, so finish within
+   * that, or Linq redelivers the event (see README: Handler time limit).
    */
   onMessage?: FunctionReference<"action", "internal" | "public">;
+  /** Called with every other verified event (reactions, delivery status...). */
+  onEvent?: FunctionReference<"action", "internal" | "public">;
   /**
-   * Called with every verified webhook event, including the ones the
-   * component also handles (reactions, delivery status, line health...).
-   */
-  onEvent?: FunctionReference<"action" | "mutation", "internal" | "public">;
-  /**
-   * Wait this long after a message before starting a turn, so a burst of
-   * texts becomes one turn. Delays every reply.
-   * @default 0
-   */
-  debounceMs?: number;
-  /**
-   * Let a newer message interrupt a running turn: its queued replies are
-   * dropped and, unless it already replied, its messages join the next turn.
-   * Pair with `isInterrupted` in slow handlers.
+   * Also call `onMessage` for messages Linq recovered late (reconciliation).
+   * Off by default, so a bot doesn't answer stale history.
    * @default false
    */
-  interrupt?: boolean;
+  includeReconciled?: boolean;
   /** @default "/linq/webhook" */
   webhookPath?: string;
   /** Falls back to `process.env.LINQ_WEBHOOK_SECRET`. */
   webhookSecret?: string;
 }
 
-// The minimum each helper needs, so any ctx that has it can be passed.
-type QueryCtx = Pick<GenericQueryCtx<GenericDataModel>, "runQuery">;
-type MutationCtx = Pick<GenericMutationCtx<GenericDataModel>, "runQuery" | "runMutation">;
-type ActionCtx = Pick<GenericActionCtx<GenericDataModel>, "runQuery" | "runMutation" | "runAction">;
-type RunQueryCtx = QueryCtx | MutationCtx | ActionCtx;
-type RunMutationCtx = MutationCtx | ActionCtx;
-type RunActionCtx = ActionCtx;
-
-type Queued = FunctionReturnType<ComponentApi["outbox"]["enqueue"]>;
+type ActionCtx = Pick<GenericActionCtx<GenericDataModel>, "runAction">;
 
 /** Where a message goes: a known chat, or recipients with an optional fixed line. */
 export type Destination =
   | { chatId: string; from?: never; to?: never }
   | {
       chatId?: never;
-      /** Pin a Linq line, or omit to let Linq select one and resolve the chat. */
+      /** Pin a Linq line, or omit to let Linq pick one and reuse the right chat. */
       from?: string;
       /** Recipient handles; more than one starts a group chat. */
       to: string[];
@@ -111,11 +93,11 @@ export type SendMessageArgs = Destination & {
   text?: string;
   /** Full Linq message content; takes precedence over `text`. */
   message?: MessageContent;
-  /** The turn this replies in. Dropped if a newer message interrupted it. */
-  turnId?: string;
   /**
-   * Dedupes the app's own retries of one logical send. Stable across retries
-   * or it dedupes nothing. Defaults to a key derived from the outbox row.
+   * Makes the send safe to repeat: Linq sends a key at most once. Derive it
+   * from what you are replying to (e.g. `reply:${message.messageId}`), so a
+   * redelivered webhook can't send the reply twice. Defaults to a random key,
+   * which only covers this call's own retries.
    */
   idempotencyKey?: string;
 };
@@ -123,8 +105,8 @@ export type SendMessageArgs = Destination & {
 const DEFAULT_WEBHOOK_PATH = "/linq/webhook";
 
 /**
- * App-side client for the Linq component. It runs in the app, so it can read
- * the app's environment and turn its function references into handles.
+ * App-side client for the Linq component. It stores nothing, in the component
+ * or in your app. Messages exist only in the calls that handle them.
  */
 export class Linq {
   constructor(
@@ -136,12 +118,7 @@ export class Linq {
     return this.options.webhookPath ?? DEFAULT_WEBHOOK_PATH;
   }
 
-  /**
-   * Mount the webhook endpoint. It verifies the Standard Webhooks signature
-   * and stores the event before answering 200, so an acknowledged delivery is
-   * durable. Unsigned or tampered deliveries get 401; a missing secret gets
-   * 500, which Linq retries for 30 minutes while you set it.
-   */
+  /** Mount the webhook endpoint in `convex/http.ts`. */
   registerRoutes(http: HttpRouter): void {
     http.route({
       path: this.webhookPath,
@@ -151,14 +128,18 @@ export class Linq {
   }
 
   /**
-   * The webhook handler `registerRoutes` mounts, for apps that route it
-   * themselves. Call it from an `httpAction`.
+   * Verify a webhook delivery and run your handler on it, in this request.
+   *
+   * - Bad or missing signature: 401, nothing runs.
+   * - Handler succeeds: 200.
+   * - Handler throws: 500, so Linq redelivers the event (for up to 30 min).
+   *
+   * For apps that route the webhook themselves; `registerRoutes` uses it.
    */
-  async handleWebhook(ctx: Pick<RunMutationCtx, "runMutation">, request: Request): Promise<Response> {
+  async handleWebhook(ctx: ActionCtx, request: Request): Promise<Response> {
     const secret = this.options.webhookSecret ?? process.env.LINQ_WEBHOOK_SECRET;
-    if (!secret) {
-      return new Response("LINQ_WEBHOOK_SECRET is not set", { status: 500 });
-    }
+    if (!secret) return new Response("LINQ_WEBHOOK_SECRET is not set", { status: 500 });
+
     const body = await request.text();
     const headers = Object.fromEntries(request.headers);
     let event: LinqWebhookEvent;
@@ -170,77 +151,53 @@ export class Linq {
     const eventId = headers["webhook-id"] ?? event.event_id;
     if (!eventId) return new Response("missing event id", { status: 400 });
 
-    await ctx.runMutation(this.component.inbound.ingest, {
-      eventId,
-      event,
-      onMessage: this.options.onMessage ? await createFunctionHandle(this.options.onMessage) : undefined,
-      onEvent: this.options.onEvent ? await createFunctionHandle(this.options.onEvent) : undefined,
-      debounceMs: this.options.debounceMs,
-      interrupt: this.options.interrupt,
-    });
+    try {
+      const message = event.event_type === "message.received" ? parseInboundMessage(event.data) : null;
+      if (message) {
+        const wanted = this.options.includeReconciled || message.reconciledAt === undefined;
+        if (this.options.onMessage && wanted) {
+          await ctx.runAction(this.options.onMessage, { eventId, message, raw: event.data });
+        }
+      } else if (this.options.onEvent) {
+        await ctx.runAction(this.options.onEvent, { eventId, event });
+      }
+    } catch (e) {
+      // Never echo the error: it may contain message content.
+      console.error(`linq: handler failed for event ${eventId}; Linq will redeliver`);
+      return new Response("handler failed", { status: 500 });
+    }
     return new Response(null, { status: 200 });
   }
 
   /**
-   * Queue a message. Commits with the calling mutation; the component sends
-   * it, in order per chat, retrying transient failures with one idempotency key.
+   * Send a message and return Linq's ids. Retries transient failures in place
+   * with one idempotency key; throws if the send fails.
    */
-  async sendMessage(ctx: RunMutationCtx, args: SendMessageArgs): Promise<Queued> {
+  async sendMessage(ctx: ActionCtx, args: SendMessageArgs) {
     const message: MessageContent | undefined =
       args.message ?? (args.text !== undefined ? { parts: [{ type: "text", value: args.text }] } : undefined);
-    return await ctx.runMutation(this.component.outbox.enqueue, {
-      kind: "message",
+    if (!message) throw new Error("linq: sendMessage needs text or a message");
+    return await ctx.runAction(this.component.api.sendMessage, {
       chatId: args.chatId,
       from: args.from,
       to: args.to,
       message,
-      turnId: args.turnId,
-      idempotencyKey: args.idempotencyKey,
+      idempotencyKey: args.idempotencyKey ?? crypto.randomUUID(),
     });
   }
 
-  /** Show a typing indicator in a chat until the next message (DMs only). */
-  async startTyping(ctx: RunMutationCtx, args: { chatId: string; turnId?: string }): Promise<Queued> {
-    return await ctx.runMutation(this.component.outbox.enqueue, { kind: "typing", ...args });
+  /** Show a typing indicator until the next message (DMs only). */
+  async startTyping(ctx: ActionCtx, args: { chatId: string }): Promise<void> {
+    await ctx.runAction(this.component.api.chatAction, { ...args, kind: "typing" });
+  }
+
+  async stopTyping(ctx: ActionCtx, args: { chatId: string }): Promise<void> {
+    await ctx.runAction(this.component.api.chatAction, { ...args, kind: "stopTyping" });
   }
 
   /** Mark a chat's messages read. */
-  async markRead(ctx: RunMutationCtx, args: { chatId: string; turnId?: string }): Promise<Queued> {
-    return await ctx.runMutation(this.component.outbox.enqueue, { kind: "read", ...args });
-  }
-
-  /** Has a newer message interrupted this turn? Only with `interrupt: true`. */
-  async isInterrupted(ctx: RunQueryCtx, args: { turnId: string }): Promise<boolean> {
-    return await ctx.runQuery(this.component.turns.isInterrupted, args);
-  }
-
-  /** A send's status and Linq's delivery report (`sent`, `delivered`, `read`, `failed`). */
-  async getSend(ctx: RunQueryCtx, args: { id: string }) {
-    return await ctx.runQuery(this.component.outbox.get, args);
-  }
-
-  /** Recent sends into a chat, oldest first. */
-  async listSends(ctx: RunQueryCtx, args: { chatId: string; limit?: number }) {
-    return await ctx.runQuery(this.component.outbox.list, args);
-  }
-
-  /** Stored inbound messages for a chat, oldest first. */
-  async listMessages(ctx: RunQueryCtx, args: { chatId: string; limit?: number }) {
-    return await ctx.runQuery(this.component.inbound.listMessages, args);
-  }
-
-  /** Cursor-paginated inbound history, newest receipt first. */
-  async paginateMessages(ctx: RunQueryCtx, args: { chatId: string; paginationOpts: PaginationOptions }) {
-    return await ctx.runQuery(this.component.inbound.paginateMessages, args);
-  }
-
-  /** Cursor-paginated outbound history, newest queued send first. */
-  async paginateSends(ctx: RunQueryCtx, args: { chatId: string; paginationOpts: PaginationOptions }) {
-    return await ctx.runQuery(this.component.outbox.paginate, args);
-  }
-
-  async getChat(ctx: RunQueryCtx, args: { chatId: string }) {
-    return await ctx.runQuery(this.component.inbound.getChat, args);
+  async markRead(ctx: ActionCtx, args: { chatId: string }): Promise<void> {
+    await ctx.runAction(this.component.api.chatAction, { ...args, kind: "read" });
   }
 
   /**
@@ -248,7 +205,7 @@ export class Linq {
    * route. Returns the signing secret once: set it as LINQ_WEBHOOK_SECRET.
    */
   async registerWebhook(
-    ctx: RunActionCtx,
+    ctx: ActionCtx,
     args: { events?: LinqEventType[]; phoneNumbers?: string[]; siteUrl?: string } = {},
   ) {
     const siteUrl = args.siteUrl ?? process.env.CONVEX_SITE_URL;
@@ -263,7 +220,9 @@ export class Linq {
   }
 
   /** The lines this API key can send from. */
-  async listLines(ctx: RunActionCtx): Promise<unknown> {
+  async listLines(ctx: ActionCtx): Promise<unknown> {
     return await ctx.runAction(this.component.setup.listLines, {});
   }
 }
+
+export type { InboundMessage as LinqMessage };

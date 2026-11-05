@@ -1,6 +1,5 @@
 /**
- * Pure helpers for Linq webhook payloads, shared by the app-side client (which
- * verifies deliveries) and the component (which stores them).
+ * Pure helpers for Linq webhook payloads.
  *
  * The component subscribes with the `2026-02-03` payload version, whose
  * message events carry `direction`, `sender_handle` and a nested `chat`.
@@ -15,7 +14,7 @@ export type LinqEventType = LinqAPIV3.WebhookEventType;
 /** Payload version the component's message parsing expects. */
 export const WEBHOOK_PAYLOAD_VERSION = "2026-02-03";
 
-/** Events the component acts on; `registerWebhook` subscribes to these by default. */
+/** Events `registerWebhook` subscribes to by default. */
 export const DEFAULT_EVENTS: LinqEventType[] = [
   "message.received",
   "message.sent",
@@ -25,30 +24,6 @@ export const DEFAULT_EVENTS: LinqEventType[] = [
   "reaction.added",
   "reaction.removed",
 ];
-
-export const DELIVERY_EVENTS = {
-  "message.sent": "sent",
-  "message.delivered": "delivered",
-  "message.read": "read",
-  "message.failed": "failed",
-} as const;
-
-export type DeliveryStatus = (typeof DELIVERY_EVENTS)[keyof typeof DELIVERY_EVENTS];
-
-/** Delivery/read evidence supersedes failure; Linq can deliver after failing. */
-const DELIVERY_RANK: Record<DeliveryStatus, number> = {
-  sent: 0,
-  failed: 1,
-  delivered: 2,
-  read: 3,
-};
-
-export function deliveryAdvances(
-  current: DeliveryStatus | undefined,
-  next: DeliveryStatus,
-): boolean {
-  return current === undefined || DELIVERY_RANK[next] > DELIVERY_RANK[current];
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -66,7 +41,7 @@ export function textOf(parts: unknown): string {
     .join("\n");
 }
 
-/** The fields of an inbound message event the component indexes. */
+/** An inbound message, as `onMessage` receives it. */
 export interface InboundMessage {
   messageId: string;
   chatId: string;
@@ -77,6 +52,11 @@ export interface InboundMessage {
   service?: string;
   sentAt?: string;
   reconciledAt?: string;
+  /**
+   * True on a zero-day-retention line. Linq keeps no copy of this message,
+   * and neither does this package; this call is the only time you see it.
+   */
+  zeroRetention: boolean;
 }
 
 /**
@@ -105,20 +85,6 @@ export function parseInboundMessage(data: unknown): InboundMessage | null {
     service: typeof data.service === "string" ? data.service : undefined,
     sentAt: typeof data.sent_at === "string" ? data.sent_at : undefined,
     reconciledAt: typeof data.reconciled_at === "string" ? data.reconciled_at : undefined,
+    zeroRetention: data.zero_retention === true,
   };
-}
-
-/** The Linq message id a delivery-status event refers to. */
-export function deliveryMessageId(eventType: string, data: unknown): string | undefined {
-  if (!isRecord(data)) return undefined;
-  const id = eventType === "message.failed" ? data.message_id : data.id;
-  return typeof id === "string" ? id : undefined;
-}
-
-export function deliveryError(data: unknown): string | undefined {
-  if (!isRecord(data)) return undefined;
-  const code = typeof data.code === "number" ? data.code : undefined;
-  const reason = typeof data.reason === "string" ? data.reason : undefined;
-  if (code === undefined && reason === undefined) return undefined;
-  return [code, reason].filter((x) => x !== undefined).join(" ");
 }

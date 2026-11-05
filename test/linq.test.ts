@@ -1,9 +1,9 @@
 import { defineTestApp } from "convex-test";
-import { createFunctionHandle, defineSchema, httpActionGeneric, httpRouter } from "convex/server";
+import { defineSchema, httpActionGeneric, httpRouter } from "convex/server";
 import { v } from "convex/values";
 import { Webhook } from "standardwebhooks";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { Linq } from "../src/client/index.js";
+import { Linq, onEventArgs, onMessageArgs } from "../src/client/index.js";
 import linqTest from "../src/test.js";
 
 const SECRET = `whsec_${btoa("linq-convex-test-secret-0123456789")}`;
@@ -42,41 +42,43 @@ const app = defineTestApp({
 });
 
 let linq: Linq;
-/** Runs inside a turn's handler before it replies; lets a test act mid-turn. */
-let midTurn: ((turn: { turnId: string; messages: { text: string }[] }) => Promise<void>) | undefined;
-let turnsSeen: string[] = [];
+let seen: Array<{ eventId: string; message: any }> = [];
+let events: any[] = [];
+let failHandler = false;
 
 const { api, internal, createTest } = app.defineModules({
   bot: {
     reply: app.internalAction({
-      args: {
-        turnId: v.string(),
-        chatId: v.string(),
-        line: v.optional(v.string()),
-        isGroup: v.optional(v.boolean()),
-        messages: v.array(v.any()),
-      },
+      args: onMessageArgs,
       returns: v.null(),
-      handler: async (ctx, turn): Promise<null> => {
-        turnsSeen.push(turn.turnId);
-        if (midTurn) await midTurn(turn);
-        const text = turn.messages.map((m: { text: string }) => m.text).join(" / ");
-        await linq.sendMessage(ctx, { chatId: turn.chatId, turnId: turn.turnId, text: `echo: ${text}` });
+      handler: async (ctx, args): Promise<null> => {
+        seen.push({ eventId: args.eventId, message: args.message });
+        if (failHandler) throw new Error("model timed out");
+        await linq.sendMessage(ctx, {
+          chatId: args.message.chatId,
+          text: `echo: ${args.message.text}`,
+          idempotencyKey: `reply:${args.message.messageId}`,
+        });
+        return null;
+      },
+    }),
+    event: app.internalAction({
+      args: onEventArgs,
+      returns: v.null(),
+      handler: async (_ctx, args): Promise<null> => {
+        events.push(args.event);
         return null;
       },
     }),
   },
   outbound: {
-    autoSend: app.mutation({
-      args: { text: v.string(), key: v.optional(v.string()) },
+    send: app.action({
+      args: { text: v.string(), from: v.optional(v.string()), chatId: v.optional(v.string()) },
       returns: v.any(),
-      handler: async (ctx, args) => linq.sendMessage(ctx, { to: [USER], text: args.text, idempotencyKey: args.key }),
-    }),
-    send: app.mutation({
-      args: { text: v.string(), key: v.optional(v.string()) },
-      returns: v.any(),
-      handler: async (ctx, args) =>
-        linq.sendMessage(ctx, { from: LINE, to: [USER], text: args.text, idempotencyKey: args.key }),
+      handler: async (ctx, args): Promise<any> =>
+        args.chatId
+          ? linq.sendMessage(ctx, { chatId: args.chatId, text: args.text })
+          : linq.sendMessage(ctx, { from: args.from, to: [USER], text: args.text }),
     }),
   },
   http: {
@@ -129,276 +131,160 @@ async function deliver(
   });
 }
 
-async function settle(t: ReturnType<typeof createTest>) {
-  // Give each worker's promises time to settle before advancing to its lease.
-  for (let i = 0; i < 100; i++) {
-    if (vi.getTimerCount() > 0) await vi.advanceTimersToNextTimerAsync();
-    else {
-      await t.finishInProgressScheduledFunctions();
-      if (vi.getTimerCount() === 0) return;
-    }
-  }
-  throw new Error("Scheduled work did not settle");
-}
-
 beforeEach(() => {
-  vi.useFakeTimers();
   stubLinq();
   process.env.LINQ_API_KEY = "test-key";
-  midTurn = undefined;
-  turnsSeen = [];
+  seen = [];
+  events = [];
+  failHandler = false;
   linq = new Linq(app.components.linq as any, {
     onMessage: internal.bot.reply,
+    onEvent: internal.bot.event,
     webhookSecret: SECRET,
   });
 });
 
-describe("automatic line selection", () => {
-  test("sends without a from line and records Linq's resolved chat and line", async () => {
-    const t = createTest();
-    const queued = await t.mutation(api.outbound.autoSend, { text: "auto", key: "auto-1" });
-    await settle(t);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ path: "/v3/messages", body: { to: [USER],
-      message: { parts: [{ type: "text", value: "auto" }], idempotency_key: "auto-1" } } });
-    expect(calls[0]!.body).not.toHaveProperty("from");
-    expect(await linq.getSend(t as any, { id: queued.id })).toMatchObject({ status: "sent", chatId: "chat-auto", messageId: "out-1" });
-    expect(await linq.getChat(t as any, { chatId: "chat-auto" })).toMatchObject({ line: LINE });
-  });
-
-  test("automatic sends keep their idempotency key on retry", async () => {
-    const t = createTest();
-    responses.push(() => new Response("busy", { status: 503 }));
-    await t.mutation(api.outbound.autoSend, { text: "auto retry", key: "auto-retry" });
-    await settle(t);
-    expect(calls.map(c => c.path)).toEqual(["/v3/messages", "/v3/messages"]);
-    expect(calls.map(c => c.body.message.idempotency_key)).toEqual(["auto-retry", "auto-retry"]);
-  });
-});
-
 afterEach(() => {
-  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 // --- tests --------------------------------------------------------------------
 
 describe("webhook", () => {
-  test("rejects a forged signature and stores nothing", async () => {
+  test("rejects a forged signature and runs nothing", async () => {
     const t = createTest();
     const res = await deliver(t, "message.received", inbound("m1", "hi"), "evt-1", `whsec_${btoa("some-other-secret-value-xyz")}`);
     expect(res.status).toBe(401);
-    expect(await linq.listMessages(t as any, { chatId: "chat-1" })).toEqual([]);
-  });
-
-  test("a redelivered event is processed once", async () => {
-    const t = createTest();
-    expect((await deliver(t, "message.received", inbound("m1", "hi"), "evt-1")).status).toBe(200);
-    expect((await deliver(t, "message.received", inbound("m1", "hi"), "evt-1")).status).toBe(200);
-    await settle(t);
-    expect(await linq.listMessages(t as any, { chatId: "chat-1" })).toHaveLength(1);
-    expect(calls.filter((c) => c.path.endsWith("/messages"))).toHaveLength(1);
-  });
-
-  test("own outbound messages and reconciled history start no turn", async () => {
-    const t = createTest();
-    await deliver(t, "message.received", { ...inbound("m1", "mine"), direction: "outbound" });
-    await deliver(t, "message.received", inbound("m2", "old", { reconciled_at: "2026-11-04T20:00:00Z" }));
-    await settle(t);
-    const stored = await linq.listMessages(t as any, { chatId: "chat-1" });
-    expect(stored.map((m) => [m.messageId, m.status])).toEqual([["m2", "handled"]]);
+    expect(seen).toEqual([]);
     expect(calls).toEqual([]);
   });
-});
 
-describe("turns and outbox", () => {
-  test("replies through the Linq API with the component's key and an idempotency key", async () => {
+  test("runs the handler inline and replies before answering 200", async () => {
     const t = createTest();
-    await deliver(t, "message.received", inbound("m1", "hello"));
-    await settle(t);
+    const res = await deliver(t, "message.received", inbound("m1", "hello"), "evt-1");
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([
+      {
+        eventId: "evt-1",
+        message: expect.objectContaining({ messageId: "m1", chatId: "chat-1", from: USER, line: LINE, text: "hello", zeroRetention: false }),
+      },
+    ]);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       method: "POST",
       path: "/v3/chats/chat-1/messages",
       auth: "Bearer test-key",
-      body: { message: { parts: [{ type: "text", value: "echo: hello" }] } },
+      body: { message: { parts: [{ type: "text", value: "echo: hello" }], idempotency_key: "reply:m1" } },
     });
-    expect(calls[0]!.body.message.idempotency_key).toMatch(/^convex-/);
   });
 
-  test("debounce folds a burst into one turn", async () => {
-    linq = new Linq(app.components.linq as any, { onMessage: internal.bot.reply, webhookSecret: SECRET, debounceMs: 1000 });
+  test("a handler failure answers 500 so Linq redelivers", async () => {
+    failHandler = true;
     const t = createTest();
-    await deliver(t, "message.received", inbound("m1", "hey"));
-    await deliver(t, "message.received", inbound("m2", "you there?"));
-    await settle(t);
-    expect(calls.map((c) => c.body?.message?.parts?.[0]?.value)).toEqual(["echo: hey / you there?"]);
+    const res = await deliver(t, "message.received", inbound("m1", "hello"));
+    expect(res.status).toBe(500);
+    // The error text is not echoed: it could contain message content.
+    expect(await res.text()).toBe("handler failed");
   });
 
-  test("interrupt drops the stale reply and answers everything in the next turn", async () => {
-    linq = new Linq(app.components.linq as any, { onMessage: internal.bot.reply, webhookSecret: SECRET, interrupt: true });
+  test("a redelivery replies with the same idempotency key, so Linq sends once", async () => {
     const t = createTest();
-    // While turn 1 is running, a second message arrives.
-    midTurn = async (turn) => {
-      if (turn.messages.some((m) => m.text === "first") && turnsSeen.length === 1) {
-        await deliver(t, "message.received", inbound("m2", "second"));
-        expect(await linq.isInterrupted(t as any, { turnId: turn.turnId })).toBe(true);
-      }
-    };
-    await deliver(t, "message.received", inbound("m1", "first"));
-    await settle(t);
-
-    expect(turnsSeen).toHaveLength(2);
-    // Turn 1's reply was queued after the interrupt, so it was dropped.
-    expect(await linq.isInterrupted(t as any, { turnId: turnsSeen[0]! })).toBe(true);
-    expect(calls.map((c) => c.body?.message?.parts?.[0]?.value)).toEqual(["echo: first / second"]);
+    await deliver(t, "message.received", inbound("m1", "hi"), "evt-1");
+    await deliver(t, "message.received", inbound("m1", "hi"), "evt-1");
+    expect(calls.map((c) => c.body.message.idempotency_key)).toEqual(["reply:m1", "reply:m1"]);
   });
 
-  test("without interrupt, a message that arrives mid-turn waits for the next turn", async () => {
+  test("own outbound messages and reconciled history do not reach onMessage", async () => {
     const t = createTest();
-    midTurn = async () => {
-      if (turnsSeen.length === 1) await deliver(t, "message.received", inbound("m2", "second"));
-    };
-    await deliver(t, "message.received", inbound("m1", "first"));
-    await settle(t);
-    expect(turnsSeen).toHaveLength(2);
-    expect(calls.map((c) => c.body?.message?.parts?.[0]?.value)).toEqual(["echo: first", "echo: second"]);
-  });
-
-  test("retries transient failures with the same idempotency key, in order", async () => {
-    const t = createTest();
-    responses.push(() => new Response("busy", { status: 503 }));
-    const a = await t.mutation(api.outbound.send, { text: "one" });
-    await t.mutation(api.outbound.send, { text: "two" });
-    await settle(t);
-    expect(calls.map((c) => c.body.message.parts[0].value)).toEqual(["one", "one", "two"]);
-    expect(calls[0]!.body.message.idempotency_key).toBe(calls[1]!.body.message.idempotency_key);
-    expect(calls[0]!.path).toBe("/v3/chats");
-    const status = await linq.getSend(t as any, { id: a.id });
-    expect(status).toMatchObject({ status: "sent", attempts: 2, chatId: "chat-new", delivery: "sent" });
-  });
-
-  test("a permanent failure is recorded and does not block the chat", async () => {
-    const t = createTest();
-    responses.push(() => new Response('{"error":"opted out"}', { status: 403 }));
-    const a = await t.mutation(api.outbound.send, { text: "one" });
-    await t.mutation(api.outbound.send, { text: "two" });
-    await settle(t);
-    expect(await linq.getSend(t as any, { id: a.id })).toMatchObject({ status: "failed", attempts: 1 });
-    expect(calls.map((c) => c.body.message.parts[0].value)).toEqual(["one", "two"]);
-  });
-
-  test("the app's idempotency key dedupes its own retries", async () => {
-    const t = createTest();
-    const a = await t.mutation(api.outbound.send, { text: "once", key: "order-42" });
-    const b = await t.mutation(api.outbound.send, { text: "once", key: "order-42" });
-    await settle(t);
-    expect(b.id).toBe(a.id);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.body.message.idempotency_key).toBe("order-42");
-  });
-
-  test("delivery webhooks advance status and never go backwards", async () => {
-    const t = createTest();
-    const a = await t.mutation(api.outbound.send, { text: "hi" });
-    await settle(t);
-    const { messageId } = (await linq.getSend(t as any, { id: a.id }))!;
-    const status = { id: messageId, direction: "outbound", chat: { id: "chat-new" }, parts: [] };
-    await deliver(t, "message.read", status);
-    await deliver(t, "message.delivered", status);
-    expect(await linq.getSend(t as any, { id: a.id })).toMatchObject({ delivery: "read" });
-  });
-
-  test("a missing API key fails the send with a clear error", async () => {
-    delete process.env.LINQ_API_KEY;
-    const t = createTest();
-    const a = await t.mutation(api.outbound.send, { text: "hi" });
-    await settle(t);
-    expect((await linq.getSend(t as any, { id: a.id }))!.error).toMatch(/LINQ_API_KEY/);
+    await deliver(t, "message.received", { ...inbound("m1", "mine"), direction: "outbound" });
+    await deliver(t, "message.received", inbound("m2", "old", { reconciled_at: "2026-11-04T20:00:00Z" }));
+    expect(seen).toEqual([]);
     expect(calls).toEqual([]);
   });
-});
 
-describe("outbox recovery", () => {
-  test("a broken response stream retries instead of leaving the lane stuck", async () => {
+  test("includeReconciled opts in to late messages", async () => {
+    linq = new Linq(app.components.linq as any, { onMessage: internal.bot.reply, webhookSecret: SECRET, includeReconciled: true });
     const t = createTest();
-    responses.push(() => new Response(new ReadableStream({
-      start(controller) { controller.error(new Error("connection lost while reading response")); },
-    }), { status: 200 }));
-    const queued = await t.mutation(api.outbound.send, { text: "first" });
-    await t.mutation(api.outbound.send, { text: "second" });
-    await settle(t);
-    expect(await linq.getSend(t as any, { id: queued.id })).toMatchObject({ status: "sent" });
-    expect(calls.map(c => c.body.message.parts[0].value)).toEqual(["first", "first", "second"]);
+    await deliver(t, "message.received", inbound("m2", "old", { reconciled_at: "2026-11-04T20:00:00Z" }));
+    expect(seen.map((s) => s.message.reconciledAt)).toEqual(["2026-11-04T20:00:00Z"]);
+  });
+
+  test("passes the zero-retention flag through", async () => {
+    const t = createTest();
+    await deliver(t, "message.received", inbound("m1", "private", { zero_retention: true }));
+    expect(seen[0]!.message.zeroRetention).toBe(true);
+  });
+
+  test("other events go to onEvent", async () => {
+    const t = createTest();
+    await deliver(t, "message.delivered", { id: "out-9", direction: "outbound", chat: { id: "chat-1" }, parts: [] });
+    await deliver(t, "reaction.added", { message_id: "m1", reaction: "love" });
+    expect(events.map((e) => e.event_type)).toEqual(["message.delivered", "reaction.added"]);
   });
 });
 
-describe("interruption dispatch boundary", () => {
-  test("interruption before dispatch preserves the original unanswered message", async () => {
-    linq = new Linq(app.components.linq as any, { onMessage: internal.bot.reply, webhookSecret: SECRET, interrupt: true });
+describe("stores nothing", () => {
+  test("a full inbound + reply leaves no rows and no scheduled jobs", async () => {
     const t = createTest();
-    midTurn = async (turn) => {
-      if (turnsSeen.length !== 1) return;
-      // Queueing a send and receiving another message can commit before the
-      // scheduled delivery action ever starts. Neither message is answered yet.
-      await t.mutation(async (ctx: any) => {
-        await ctx.runMutation(app.components.linq.outbox.enqueue, {
-          kind: "message", chatId: "chat-1", turnId: turn.turnId,
-          message: { parts: [{ type: "text", value: "not dispatched yet" }] },
-        });
-        await ctx.runMutation(app.components.linq.inbound.ingest, {
-          eventId: "interrupt-before-dispatch",
-          event: { event_type: "message.received", data: inbound("m2", "second") },
-          onMessage: await createFunctionHandle(internal.bot.reply), interrupt: true,
-        });
-      });
-    };
-    await deliver(t, "message.received", inbound("m1", "first"));
-    await settle(t);
-    expect(calls.map(c => c.body.message.parts[0].value)).toEqual(["echo: first / second"]);
+    await deliver(t, "message.received", inbound("m1", "secret text"));
+    await deliver(t, "message.delivered", { id: "out-1", direction: "outbound", chat: { id: "chat-1" }, parts: [] });
+    const jobs = await t.run(async (ctx: any) => ctx.db.system.query("_scheduled_functions").collect());
+    expect(jobs).toEqual([]);
+    // The component's schema declares no tables, so it has nowhere to write.
+    expect(Object.keys(linqTest.schema.tables)).toEqual([]);
   });
 });
 
-describe("delivery reconciliation", () => {
-  test("a late failure cannot replace read evidence", async () => {
+describe("sending", () => {
+  test("retries a transient failure in place with one idempotency key", async () => {
     const t = createTest();
-    const queued = await t.mutation(api.outbound.send, { text: "read already" });
-    await settle(t);
-    const { messageId } = (await linq.getSend(t as any, { id: queued.id }))!;
-    await deliver(t, "message.read", { id: messageId });
-    await deliver(t, "message.failed", { message_id: messageId, code: 4001, reason: "stale failure" });
-    const send = await linq.getSend(t as any, { id: queued.id });
-    expect(send).toMatchObject({ delivery: "read" });
-    expect(send?.error).toBeUndefined();
+    responses.push(() => new Response("busy", { status: 503 }));
+    const sent = await t.action(api.outbound.send, { chatId: "chat-1", text: "one" });
+    expect(sent).toMatchObject({ chatId: "chat-1", messageId: "out-1" });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.message.idempotency_key).toBe(calls[1]!.body.message.idempotency_key);
   });
-  test("retains a receipt that arrives before the send HTTP response", async () => {
+
+  test("a permanent failure throws without retrying", async () => {
     const t = createTest();
-    let releaseFetch!: (response: Response) => void;
-    let notifyStarted!: () => void;
-    const started = new Promise<void>(resolve => { notifyStarted = resolve; });
-    vi.stubGlobal("fetch", () => new Promise<Response>(resolve => {
-      releaseFetch = resolve;
-      notifyStarted();
-    }));
-    const queued = await t.mutation(api.outbound.send, { text: "race" });
-    const settling = settle(t);
-    await started;
-    await t.mutation(app.components.linq.inbound.ingest, {
-      eventId: "early-read",
-      event: { event_type: "message.read", data: { id: "out-early", chat: { id: "chat-new" } } },
+    responses.push(() => new Response('{"error":"opted out"}', { status: 403 }));
+    await expect(t.action(api.outbound.send, { chatId: "chat-1", text: "one" })).rejects.toThrow(/403/);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a pinned line uses POST /v3/chats", async () => {
+    const t = createTest();
+    const sent = await t.action(api.outbound.send, { from: LINE, text: "hi" });
+    expect(calls[0]).toMatchObject({ path: "/v3/chats", body: { from: LINE, to: [USER] } });
+    expect(sent).toMatchObject({ chatId: "chat-new", messageId: "out-1" });
+  });
+
+  test("no line lets Linq pick one via POST /v3/messages", async () => {
+    const t = createTest();
+    const sent = await t.action(api.outbound.send, { text: "hi" });
+    expect(calls[0]).toMatchObject({ path: "/v3/messages", body: { to: [USER] } });
+    expect(calls[0]!.body.from).toBeUndefined();
+    expect(sent).toEqual({ chatId: "chat-auto", from: LINE, messageId: "out-1" });
+  });
+
+  test("typing, stop typing and read", async () => {
+    const t = createTest();
+    await t.action(async (ctx: any) => {
+      await linq.startTyping(ctx, { chatId: "chat-1" });
+      await linq.stopTyping(ctx, { chatId: "chat-1" });
+      await linq.markRead(ctx, { chatId: "chat-1" });
     });
-    releaseFetch(Response.json({ chat: { id: "chat-new", message: { id: "out-early" } } }));
-    await settling;
-    expect(await linq.getSend(t as any, { id: queued.id })).toMatchObject({ delivery: "read" });
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "POST /v3/chats/chat-1/typing",
+      "DELETE /v3/chats/chat-1/typing",
+      "POST /v3/chats/chat-1/read",
+    ]);
   });
-  test("accepts successful delivery after a failure notification", async () => {
+
+  test("a missing API key fails with a clear error", async () => {
+    delete process.env.LINQ_API_KEY;
     const t = createTest();
-    const queued = await t.mutation(api.outbound.send, { text: "eventual delivery" });
-    await settle(t);
-    const { messageId } = (await linq.getSend(t as any, { id: queued.id }))!;
-    await deliver(t, "message.failed", { message_id: messageId, chat_id: "chat-new", code: 4001, reason: "temporary" });
-    await deliver(t, "message.delivered", { id: messageId, chat: { id: "chat-new" } });
-    expect(await linq.getSend(t as any, { id: queued.id })).toMatchObject({ delivery: "delivered" });
-    expect((await linq.getSend(t as any, { id: queued.id }))?.error).toBeUndefined();
+    await expect(t.action(api.outbound.send, { chatId: "chat-1", text: "hi" })).rejects.toThrow(/LINQ_API_KEY/);
+    expect(calls).toEqual([]);
   });
 });

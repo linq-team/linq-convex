@@ -1,0 +1,95 @@
+/**
+ * Calls to the Linq Partner API. Nothing is stored: each call is one request,
+ * retried in place on transient failures with the same idempotency key.
+ */
+
+import { v } from "convex/values";
+import { action, env } from "./_generated/server.js";
+import {
+  linqRequest,
+  MAX_RETRY_AFTER_MS,
+  RETRY_DELAYS_MS,
+  type CallResult,
+} from "./transport.js";
+
+function credentials() {
+  const apiKey = env.LINQ_API_KEY;
+  if (!apiKey) {
+    throw new Error("LINQ_API_KEY is not set for the linq component (see README: Configure)");
+  }
+  return { apiKey, baseUrl: env.LINQ_BASE_URL };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** One request with in-place retries. Throws the last error if it never succeeds. */
+async function withRetries(attempt: () => Promise<CallResult>): Promise<unknown> {
+  for (let i = 0; ; i++) {
+    const result = await attempt();
+    if (result.ok) return result.body;
+    const delay = RETRY_DELAYS_MS[i];
+    if (!result.retryable || delay === undefined) {
+      throw new Error(`linq: ${result.error}`);
+    }
+    await sleep(Math.max(delay, Math.min(result.retryAfterMs ?? 0, MAX_RETRY_AFTER_MS)));
+  }
+}
+
+/** Linq's ids from a send response (any of the three send endpoints). */
+function sentIds(body: unknown) {
+  const b = body as {
+    chat_id?: string;
+    from?: string;
+    message?: { id?: string };
+    chat?: { id?: string; message?: { id?: string } };
+  } | null;
+  return {
+    chatId: b?.chat_id ?? b?.chat?.id,
+    messageId: b?.message?.id ?? b?.chat?.message?.id,
+    from: b?.from,
+  };
+}
+
+export const sendMessage = action({
+  args: {
+    chatId: v.optional(v.string()),
+    from: v.optional(v.string()),
+    to: v.optional(v.array(v.string())),
+    message: v.any(),
+    idempotencyKey: v.string(),
+  },
+  returns: v.object({
+    chatId: v.optional(v.string()),
+    messageId: v.optional(v.string()),
+    from: v.optional(v.string()),
+  }),
+  handler: async (_ctx, args) => {
+    if (!args.chatId && !args.to?.length) {
+      throw new Error("linq: sendMessage needs a chatId or at least one recipient in to");
+    }
+    const creds = credentials();
+    const message = { ...(args.message as Record<string, unknown>), idempotency_key: args.idempotencyKey };
+    const body = await withRetries(() =>
+      args.chatId
+        ? linqRequest(creds, "POST", `/v3/chats/${encodeURIComponent(args.chatId)}/messages`, { message })
+        : args.from
+          ? linqRequest(creds, "POST", "/v3/chats", { from: args.from, to: args.to, message })
+          : linqRequest(creds, "POST", "/v3/messages", { to: args.to, message }),
+    );
+    return sentIds(body);
+  },
+});
+
+export const chatAction = action({
+  args: {
+    chatId: v.string(),
+    kind: v.union(v.literal("typing"), v.literal("stopTyping"), v.literal("read")),
+  },
+  returns: v.null(),
+  handler: async (_ctx, { chatId, kind }) => {
+    const creds = credentials();
+    const path = `/v3/chats/${encodeURIComponent(chatId)}/${kind === "read" ? "read" : "typing"}`;
+    await withRetries(() => linqRequest(creds, kind === "stopTyping" ? "DELETE" : "POST", path));
+    return null;
+  },
+});

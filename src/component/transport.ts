@@ -5,9 +5,15 @@
 
 export const DEFAULT_BASE_URL = "https://api.linqapp.com/api/partner";
 
-/** Delay before each retry. Its length is the retry budget. */
-export const RETRY_DELAYS_MS = [2_000, 10_000, 30_000, 120_000, 600_000];
-export const REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * Delay before each in-call retry. Kept short: a reply usually runs inside a
+ * webhook request, and Linq times webhooks out after 10 seconds.
+ */
+export const RETRY_DELAYS_MS = [500, 2_000];
+/** Deadline for one HTTP attempt, response body included. */
+export const REQUEST_TIMEOUT_MS = 10_000;
+/** Longest Retry-After the in-call retry will wait for. */
+export const MAX_RETRY_AFTER_MS = 5_000;
 
 export type CallResult =
   | { ok: true; body: unknown }
