@@ -1,7 +1,7 @@
 {
   "name": "@linqapp/convex",
   "version": "0.1.0",
-  "description": "Convex component for Linq: receive and send iMessage, RCS and SMS from your Convex backend. Stateless.",
+  "description": "Convex component for Linq: receive and send iMessage, RCS and SMS from your Convex backend.",
   "repository": "github:linq-team/linq-convex",
   "homepage": "https://github.com/linq-team/linq-convex#readme",
   "license": "Apache-2.0",

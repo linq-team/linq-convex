@@ -3,8 +3,8 @@
 A [Convex component](https://docs.convex.dev/components) for [Linq](https://linqapp.com): receive and
 send iMessage, RCS and SMS from your Convex backend.
 
-It is **stateless**. It stores no messages, events or metadata, in its own tables or in yours, and
-schedules no background jobs. A message exists only inside the call that handles it, the same as with
+It stores no messages, events or metadata, in its own tables or in yours, and schedules no
+background jobs. A message exists only inside the call that handles it, the same as with
 any webhook consumer. That makes it safe for zero-day-retention lines. See [Data](#data).
 
 - Verifies every webhook's Standard Webhooks signature before your code sees it.

@@ -105,8 +105,8 @@ export type SendMessageArgs = Destination & {
 const DEFAULT_WEBHOOK_PATH = "/linq/webhook";
 
 /**
- * App-side client for the Linq component. Stateless: it stores nothing, in the
- * component or in your app. Messages exist only in the calls that handle them.
+ * App-side client for the Linq component. It stores nothing, in the component
+ * or in your app. Messages exist only in the calls that handle them.
  */
 export class Linq {
   constructor(
