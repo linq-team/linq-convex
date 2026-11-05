@@ -40,7 +40,7 @@ async function scheduleAttempt(ctx: MutationCtx, row: Doc<"outbox">, delay = 0) 
 
 function laneFor(args: { chatId?: string; from?: string; to?: string[] }): string {
   if (args.chatId) return `chat:${args.chatId}`;
-  return `new:${args.from}:${[...(args.to ?? [])].sort().join(",")}`;
+  return `new:${args.from ?? "auto"}:${[...(args.to ?? [])].sort().join(",")}`;
 }
 
 /** Hand the lane's oldest queued row to `deliver`, unless one is in flight. */
@@ -62,7 +62,7 @@ export const enqueue = mutation({
   args: {
     kind: sendKind,
     chatId: v.optional(v.string()),
-    /** With `to`, for a chat that may not exist yet: the line to send from. */
+    /** Optional fixed line for a new chat. Omit to use Linq's automatic routing. */
     from: v.optional(v.string()),
     to: v.optional(v.array(v.string())),
     message: v.optional(v.any()),
@@ -75,8 +75,8 @@ export const enqueue = mutation({
       throw new Error(`linq: ${args.kind} needs a chatId`);
     }
     if (args.kind === "message") {
-      if (!args.chatId && !(args.from && args.to?.length)) {
-        throw new Error("linq: sendMessage needs a chatId, or from and to");
+      if (!args.chatId && !args.to?.length) {
+        throw new Error("linq: sendMessage needs a chatId or at least one recipient in to");
       }
       if (!args.message) throw new Error("linq: sendMessage needs text or a message");
     }
@@ -171,8 +171,11 @@ async function call(row: Doc<"outbox">, apiKey: string, baseUrl?: string): Promi
     case "message":
       return chat
         ? linqRequest(creds, "POST", `/v3/chats/${chat}/messages`, { message: messageBody(row) })
-        : linqRequest(creds, "POST", "/v3/chats", {
+        : row.from ? linqRequest(creds, "POST", "/v3/chats", {
             from: row.from,
+            to: row.to,
+            message: messageBody(row),
+          }) : linqRequest(creds, "POST", "/v3/messages", {
             to: row.to,
             message: messageBody(row),
           });
@@ -180,15 +183,17 @@ async function call(row: Doc<"outbox">, apiKey: string, baseUrl?: string): Promi
 }
 
 /** Linq's chat and message ids from a send response. */
-function sentIds(body: unknown): { chatId?: string; messageId?: string } {
+function sentIds(body: unknown): { chatId?: string; messageId?: string; from?: string } {
   const b = body as {
     chat_id?: string;
     message?: { id?: string };
     chat?: { id?: string; message?: { id?: string } };
+    from?: string;
   } | null;
   return {
     chatId: b?.chat_id ?? b?.chat?.id,
     messageId: b?.message?.id ?? b?.chat?.message?.id,
+    from: b?.from,
   };
 }
 
@@ -243,6 +248,7 @@ export const settle = internalMutation({
     retryAfterMs: v.optional(v.number()),
     chatId: v.optional(v.string()),
     messageId: v.optional(v.string()),
+    from: v.optional(v.string()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -269,13 +275,16 @@ export const settle = internalMutation({
         recoveryJob: undefined,
         ...(args.messageId ? { messageId: args.messageId, ...await receiptForMessage(ctx, args.messageId) } : {}),
         ...(args.chatId && !row.chatId ? { chatId: args.chatId } : {}),
+        ...(args.from && !row.from ? { from: args.from } : {}),
       });
       if (args.chatId && !row.chatId) {
         const known = await ctx.db
           .query("chats")
           .withIndex("by_chatId", (q) => q.eq("chatId", args.chatId!))
           .unique();
-        if (!known) await ctx.db.insert("chats", { chatId: args.chatId, line: row.from });
+        const line = args.from ?? row.from;
+        if (!known) await ctx.db.insert("chats", { chatId: args.chatId, line });
+        else if (line && !known.line) await ctx.db.patch("chats", known._id, { line });
       }
     } else {
       await ctx.db.patch("outbox", row._id, {

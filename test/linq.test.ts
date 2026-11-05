@@ -29,6 +29,7 @@ function stubLinq() {
     const chat = path.match(/^\/v3\/chats\/([^/]+)\/messages$/);
     if (chat) return Response.json({ chat_id: chat[1], message: { id: `out-${++n}` } });
     if (path === "/v3/chats") return Response.json({ chat: { id: "chat-new", message: { id: `out-${++n}` } } });
+    if (path === "/v3/messages") return Response.json({ chat_id: "chat-auto", from: LINE, message: { id: `out-${++n}` } });
     return new Response(null, { status: 204 });
   });
 }
@@ -66,6 +67,11 @@ const { api, internal, createTest } = app.defineModules({
     }),
   },
   outbound: {
+    autoSend: app.mutation({
+      args: { text: v.string(), key: v.optional(v.string()) },
+      returns: v.any(),
+      handler: async (ctx, args) => linq.sendMessage(ctx, { to: [USER], text: args.text, idempotencyKey: args.key }),
+    }),
     send: app.mutation({
       args: { text: v.string(), key: v.optional(v.string()) },
       returns: v.any(),
@@ -144,6 +150,29 @@ beforeEach(() => {
   linq = new Linq(app.components.linq as any, {
     onMessage: internal.bot.reply,
     webhookSecret: SECRET,
+  });
+});
+
+describe("automatic line selection", () => {
+  test("sends without a from line and records Linq's resolved chat and line", async () => {
+    const t = createTest();
+    const queued = await t.mutation(api.outbound.autoSend, { text: "auto", key: "auto-1" });
+    await settle(t);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ path: "/v3/messages", body: { to: [USER],
+      message: { parts: [{ type: "text", value: "auto" }], idempotency_key: "auto-1" } } });
+    expect(calls[0]!.body).not.toHaveProperty("from");
+    expect(await linq.getSend(t as any, { id: queued.id })).toMatchObject({ status: "sent", chatId: "chat-auto", messageId: "out-1" });
+    expect(await linq.getChat(t as any, { chatId: "chat-auto" })).toMatchObject({ line: LINE });
+  });
+
+  test("automatic sends keep their idempotency key on retry", async () => {
+    const t = createTest();
+    responses.push(() => new Response("busy", { status: 503 }));
+    await t.mutation(api.outbound.autoSend, { text: "auto retry", key: "auto-retry" });
+    await settle(t);
+    expect(calls.map(c => c.path)).toEqual(["/v3/messages", "/v3/messages"]);
+    expect(calls.map(c => c.body.message.idempotency_key)).toEqual(["auto-retry", "auto-retry"]);
   });
 });
 
