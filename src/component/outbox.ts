@@ -6,6 +6,7 @@
  */
 
 import { v } from "convex/values";
+import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { internal } from "./_generated/api.js";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import {
@@ -355,5 +356,17 @@ export const list = query({
       .order("desc")
       .take(Math.min(limit ?? 50, 500));
     return rows.reverse().map(view);
+  },
+});
+
+/** Cursor pagination by queued order, newest first. */
+export const paginate = query({
+  args: { chatId: v.string(), paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(sendView),
+  handler: async (ctx, { chatId, paginationOpts }) => {
+    const result = await ctx.db.query("outbox")
+      .withIndex("by_chatId", q => q.eq("chatId", chatId))
+      .order("desc").paginate(paginationOpts);
+    return { ...result, page: result.page.map(view) };
   },
 });
