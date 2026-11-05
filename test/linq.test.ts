@@ -1,5 +1,5 @@
 import { defineTestApp } from "convex-test";
-import { defineSchema, httpActionGeneric, httpRouter } from "convex/server";
+import { createFunctionHandle, defineSchema, httpActionGeneric, httpRouter } from "convex/server";
 import { v } from "convex/values";
 import { Webhook } from "standardwebhooks";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -301,5 +301,31 @@ describe("outbox recovery", () => {
     await settle(t);
     expect(await linq.getSend(t as any, { id: queued.id })).toMatchObject({ status: "sent" });
     expect(calls.map(c => c.body.message.parts[0].value)).toEqual(["first", "first", "second"]);
+  });
+});
+
+describe("interruption dispatch boundary", () => {
+  test("interruption before dispatch preserves the original unanswered message", async () => {
+    linq = new Linq(app.components.linq as any, { onMessage: internal.bot.reply, webhookSecret: SECRET, interrupt: true });
+    const t = createTest();
+    midTurn = async (turn) => {
+      if (turnsSeen.length !== 1) return;
+      // Queueing a send and receiving another message can commit before the
+      // scheduled delivery action ever starts. Neither message is answered yet.
+      await t.mutation(async (ctx: any) => {
+        await ctx.runMutation(app.components.linq.outbox.enqueue, {
+          kind: "message", chatId: "chat-1", turnId: turn.turnId,
+          message: { parts: [{ type: "text", value: "not dispatched yet" }] },
+        });
+        await ctx.runMutation(app.components.linq.inbound.ingest, {
+          eventId: "interrupt-before-dispatch",
+          event: { event_type: "message.received", data: inbound("m2", "second") },
+          onMessage: await createFunctionHandle(internal.bot.reply), interrupt: true,
+        });
+      });
+    };
+    await deliver(t, "message.received", inbound("m1", "first"));
+    await settle(t);
+    expect(calls.map(c => c.body.message.parts[0].value)).toEqual(["echo: first / second"]);
   });
 });

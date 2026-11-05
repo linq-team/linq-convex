@@ -12,7 +12,6 @@ import {
   env,
   internalAction,
   internalMutation,
-  internalQuery,
   mutation,
   type MutationCtx,
   query,
@@ -115,15 +114,42 @@ export const enqueue = mutation({
   },
 });
 
-export const load = internalQuery({
-  args: { id: v.id("outbox") },
-  handler: async (ctx, { id }): Promise<{ row: Doc<"outbox">; interrupted: boolean } | null> => {
+/** Claim dispatch in the same transactional order as an interruption. */
+export const claim = internalMutation({
+  args: { id: v.id("outbox"), generation: v.number() },
+  handler: async (ctx, { id, generation }): Promise<Doc<"outbox"> | null> => {
     const row = await ctx.db.get("outbox", id);
-    if (!row) return null;
+    if (!row || row.status !== "sending" || (row.generation ?? 0) !== generation) return null;
     const turn = row.turnId ? await ctx.db.get("turns", row.turnId) : null;
-    return { row, interrupted: turn?.status === "interrupted" };
+    if (turn?.status === "interrupted" && row.dispatchedAt === undefined) {
+      await ctx.runMutation(internal.outbox.settle, { id, generation, outcome: "cancelled" });
+      return null;
+    }
+    // Once dispatched, retries must resolve the original send with the same key,
+    // even if an interruption arrives while its outcome is unknown.
+    if (row.dispatchedAt === undefined) await ctx.db.patch("outbox", id, { dispatchedAt: Date.now() });
+    return row;
   },
 });
+
+/** Cancel only sends that have not crossed the dispatch boundary. */
+export async function cancelTurnSends(ctx: MutationCtx, turnId: Id<"turns">): Promise<boolean> {
+  const sends = await ctx.db.query("outbox").withIndex("by_turnId", q => q.eq("turnId", turnId)).collect();
+  const lanes = new Set<string>();
+  let answered = false;
+  for (const send of sends) {
+    if (send.status === "sent" || (send.status === "sending" && send.dispatchedAt !== undefined)) {
+      if (send.kind === "message") answered = true;
+    } else if (send.status === "queued" || send.status === "sending") {
+      await cancelPending(ctx, send.job);
+      await cancelPending(ctx, send.recoveryJob);
+      await ctx.db.patch("outbox", send._id, { status: "cancelled", job: undefined, recoveryJob: undefined });
+      lanes.add(send.lane);
+    }
+  }
+  for (const lane of lanes) await pump(ctx, lane);
+  return answered;
+}
 
 function messageBody(row: Doc<"outbox">): Record<string, unknown> {
   return {
@@ -168,12 +194,6 @@ export const deliver = internalAction({
   args: { id: v.id("outbox"), generation: v.optional(v.number()) },
   returns: v.null(),
   handler: async (ctx, { id, generation = 0 }) => {
-    const loaded = await ctx.runQuery(internal.outbox.load, { id });
-    if (!loaded || loaded.row.status !== "sending" || (loaded.row.generation ?? 0) !== generation) return null;
-    if (loaded.interrupted) {
-      await ctx.runMutation(internal.outbox.settle, { id, generation, outcome: "cancelled" });
-      return null;
-    }
     const apiKey = env.LINQ_API_KEY;
     if (!apiKey) {
       await ctx.runMutation(internal.outbox.settle, {
@@ -184,7 +204,9 @@ export const deliver = internalAction({
       });
       return null;
     }
-    const result = await call(loaded.row, apiKey, env.LINQ_BASE_URL);
+    const row = await ctx.runMutation(internal.outbox.claim, { id, generation });
+    if (!row) return null;
+    const result = await call(row, apiKey, env.LINQ_BASE_URL);
     if (result.ok) {
       await ctx.runMutation(internal.outbox.settle, {
         id,
