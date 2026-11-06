@@ -30,8 +30,8 @@ the one in `package.json`.
    Use the actual head branch shown on the PR. Confirm the completed `check` job's head SHA
    matches the PR's latest commit and that the required check is green before merging.
    Repeat after every update to the version PR; running CI on `main` does not validate the
-   version PR. If GitHub offers **Approve workflows to run** for the bot PR, approving its
-   pending CI run is also sufficient once it succeeds on that same latest commit.
+   version PR. The manual dispatch is required because no pull-request workflow is created
+   by those bot commits.
 
 4. **Merge the Version Packages PR.** That changes `package.json`, which triggers
    `publish.yml`: it builds, typechecks, tests, publishes to npm, tags `v<version>` and cuts a
