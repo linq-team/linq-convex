@@ -1,6 +1,6 @@
 {
   "name": "@linqapp/convex",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Convex component for Linq: receive and send iMessage, RCS and SMS from your Convex backend.",
   "repository": {
     "type": "git",

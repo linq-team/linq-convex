@@ -18,20 +18,22 @@ the one in `package.json`.
 2. **Merge to `main`.** The Version workflow opens or updates a **Version Packages** PR that
    applies every pending changeset: it bumps `package.json` and writes `CHANGELOG.md`.
 
-3. **Run CI on the Version Packages PR's latest commit.** The Version workflow uses
-   `GITHUB_TOKEN`, so its bot-created commits do not automatically run all checks.
-   In **Actions → CI → Run workflow**, select the PR's head branch (usually
-   `changeset-release/main`), then run it. From the CLI, use:
+3. **Trigger PR checks with a maintainer push.** The Version workflow uses
+   `GITHUB_TOKEN`, so its bot-created commits do not automatically trigger pull-request CI.
+   Check out the Version Packages PR, synchronize the root version in `package-lock.json`
+   with `package.json`, and push that commit using your maintainer credentials. This starts
+   the normal pull-request workflow. If the lockfile is already current, an empty commit
+   is sufficient:
 
    ```sh
-   gh workflow run ci.yml --repo linq-team/linq-convex --ref changeset-release/main
+   gh pr checkout <version-pr-number> --repo linq-team/linq-convex
+   git commit --allow-empty -m "Run release PR checks"
+   git push
    ```
 
-   Use the actual head branch shown on the PR. Confirm the completed `check` job's head SHA
-   matches the PR's latest commit and that the required check is green before merging.
-   Repeat after every update to the version PR; running CI on `main` does not validate the
-   version PR. The manual dispatch is required because no pull-request workflow is created
-   by those bot commits.
+   Confirm the required `check` is green on the latest PR commit before merging. Repeat
+   after bot updates. A manually dispatched check is useful for diagnosis but may not
+   satisfy the PR's required check association; do not bypass branch protection.
 
 4. **Merge the Version Packages PR.** That changes `package.json`, which triggers
    `publish.yml`: it builds, typechecks, tests, publishes to npm, tags `v<version>` and cuts a
