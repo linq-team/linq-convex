@@ -53,8 +53,9 @@ export interface InboundMessage {
   sentAt?: string;
   reconciledAt?: string;
   /**
-   * True on a zero-day-retention line. Linq keeps no copy of this message,
-   * and neither does this package; this call is the only time you see it.
+   * True on a zero-day-retention line. This package does not persist it.
+   * Linq may retain short-lived delivery copies and replay webhook content;
+   * see Linq's zero-day-retention policy for the upstream retention boundary.
    */
   zeroRetention: boolean;
 }

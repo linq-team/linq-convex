@@ -155,9 +155,12 @@ await linq.startTyping(ctx, { chatId }); // DMs only
 await linq.stopTyping(ctx, { chatId });
 ```
 
-All of these are action helpers (they make HTTP calls). Network errors, 408, 425, 429 and 5xx are
+All of these are action helpers (they make HTTP calls). Network errors, 408, 425, 429, 5xx, and
+409 error code 2009 (chat still being created) are
 retried after 0.5 s and 2 s with the same idempotency key, and each attempt has a 10-second deadline.
-Other errors, or a failure after the retries, throw.
+The client honors `Retry-After`; if it exceeds the five-second in-call wait budget, it throws
+instead of retrying early. Other errors, or a failure after the retries, throw. Preserve the same
+idempotency key when retrying an unknown send result.
 
 Delivery status (`message.delivered`, `message.read`, `message.failed`) arrives as webhook events at
 `onEvent`. The component doesn't record it; keep it yourself if you need it.
@@ -170,8 +173,9 @@ jobs, and it never logs message content.
 Where message data goes:
 
 - **Inbound:** Linq's webhook request, verified, then the arguments of your `onMessage` action, in
-  memory. On zero-day-retention lines Linq keeps no copy either, so that call is the only time the
-  content exists anywhere.
+  memory. Linq's zero-day-retention mode removes durable message content from its database, but
+  short-lived delivery copies and webhook retries can still contain it. See
+  [Linq's retention policy](https://docs.linqapp.com/channel/imessage/guides/platform/zero-day-retention/).
 - **Outbound:** the arguments of the component's send action, then Linq's API.
 - **Your code:** anything you write to your own tables or pass to `ctx.scheduler` is yours to keep
   or delete. The package never does it for you.

@@ -150,6 +150,37 @@ afterEach(() => {
 
 // --- tests --------------------------------------------------------------------
 
+test("does not retry before a long Retry-After interval", async () => {
+  const t = createTest();
+  responses.push(() => new Response("private body", { status: 429, headers: { "Retry-After": "60" } }));
+  await expect(t.action(api.outbound.send, { text: "hello" })).rejects.toThrow("retry after 60 seconds");
+  expect(calls).toHaveLength(1);
+});
+
+test("retries a provisioning conflict without changing the send key", async () => {
+  const t = createTest();
+  responses.push(() => Response.json({ error: { code: 2009 } }, { status: 409 }));
+  await t.action(api.outbound.send, { text: "hello" });
+  expect(calls).toHaveLength(2);
+  expect(calls[0]!.body).toEqual(calls[1]!.body);
+});
+
+test.each(["", "<html>private content</html>", "{}"])("retries an indeterminate send response without changing the key: %s", async (body) => {
+  const t = createTest();
+  responses.push(() => new Response(body, { status: 200 }));
+  await expect(t.action(api.outbound.send, { text: "hello" })).resolves.toMatchObject({ messageId: expect.any(String) });
+  expect(calls).toHaveLength(2);
+  expect(calls[0]!.body).toEqual(calls[1]!.body);
+});
+
+test("never acknowledges a send when all successful responses are malformed", async () => {
+  const t = createTest();
+  responses.push(...Array.from({ length: 3 }, () => () => Response.json({})));
+  await expect(t.action(api.outbound.send, { text: "hello" })).rejects.toThrow("same idempotency key");
+  expect(calls).toHaveLength(3);
+  expect(calls[0]!.body).toEqual(calls[2]!.body);
+});
+
 describe("webhook", () => {
   test("rejects a forged signature and runs nothing", async () => {
     const t = createTest();

@@ -27,16 +27,19 @@ async function withRetries(attempt: () => Promise<CallResult>): Promise<unknown>
   for (let i = 0; ; i++) {
     const result = await attempt();
     if (result.ok) return result.body;
+    if ((result.retryAfterMs ?? 0) > MAX_RETRY_AFTER_MS) {
+      throw new Error(`linq: ${result.error}; retry after ${Math.ceil(result.retryAfterMs! / 1000)} seconds with the same idempotency key`);
+    }
     const delay = RETRY_DELAYS_MS[i];
     if (!result.retryable || delay === undefined) {
       throw new Error(`linq: ${result.error}`);
     }
-    await sleep(Math.max(delay, Math.min(result.retryAfterMs ?? 0, MAX_RETRY_AFTER_MS)));
+    await sleep(Math.max(delay, result.retryAfterMs ?? 0));
   }
 }
 
 /** Linq's ids from a send response (any of the three send endpoints). */
-function sentIds(body: unknown) {
+function sentIds(body: unknown, existingChatId?: string) {
   const b = body as {
     chat_id?: string;
     from?: string;
@@ -44,7 +47,7 @@ function sentIds(body: unknown) {
     chat?: { id?: string; message?: { id?: string } };
   } | null;
   return {
-    chatId: b?.chat_id ?? b?.chat?.id,
+    chatId: b?.chat_id ?? b?.chat?.id ?? existingChatId,
     messageId: b?.message?.id ?? b?.chat?.message?.id,
     from: b?.from,
   };
@@ -69,14 +72,21 @@ export const sendMessage = action({
     }
     const creds = credentials();
     const message = { ...(args.message as Record<string, unknown>), idempotency_key: args.idempotencyKey };
-    const body = await withRetries(() =>
-      args.chatId
+    const body = await withRetries(async () => {
+      const result = await (args.chatId
         ? linqRequest(creds, "POST", `/v3/chats/${encodeURIComponent(args.chatId)}/messages`, { message })
         : args.from
           ? linqRequest(creds, "POST", "/v3/chats", { from: args.from, to: args.to, message })
-          : linqRequest(creds, "POST", "/v3/messages", { to: args.to, message }),
-    );
-    return sentIds(body);
+          : linqRequest(creds, "POST", "/v3/messages", { to: args.to, message }));
+      if (result.ok) {
+        const ids = sentIds(result.body, args.chatId);
+        if (typeof ids.chatId !== "string" || !ids.chatId || typeof ids.messageId !== "string" || !ids.messageId) {
+          return { ok: false, retryable: true, error: "send response was invalid; retry with the same idempotency key" };
+        }
+      }
+      return result;
+    });
+    return sentIds(body, args.chatId);
   },
 });
 

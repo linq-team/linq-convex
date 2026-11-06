@@ -20,9 +20,13 @@ the one in `package.json`.
 
 3. **Merge the Version Packages PR.** That changes `package.json`, which triggers
    `publish.yml`: it builds, typechecks, tests, publishes to npm, tags `v<version>` and cuts a
-   GitHub release. If that version is already on npm it does nothing.
+   GitHub release. If that version is already on npm it skips publication and repairs missing
+   release metadata after verifying the published source.
 
-Nothing publishes until step 3, so the Version Packages PR is the release gate.
+Publication runs only on protected `main`, through the `npm-convex-release` environment.
+Require review and passing CI on `main`, and restrict the environment to protected branches.
+The Version Packages PR is the normal release gate. A maintainer can also dispatch the same
+workflow on `main`; it uses the exact version in the reviewed `package.json`.
 
 `changesets/action` does not publish because it runs the publish command as a child process
 without the OIDC token, so `npm publish` fails `ENEEDAUTH`
@@ -30,17 +34,11 @@ without the OIDC token, so `npm publish` fails `ENEEDAUTH`
 
 ## One-time setup
 
-npm only lets you add a trusted publisher to a package that already exists, so the first
-version is published by hand from an account in the `@linqapp` npm org:
-
-```sh
-npm login                      # an @linqapp org member with publish rights
-npm ci
-rm -rf dist *.tsbuildinfo && npm run build
-npm test
-npm publish --access public
-git tag v0.1.0 && git push origin v0.1.0
-```
+npm only lets you add a trusted publisher to a package that already exists. For the first
+release, configure a short-lived, scope-limited `NPM_TOKEN` in the protected
+`npm-convex-release` environment and dispatch `publish.yml` on `main` with
+`bootstrap_with_token: true`. The workflow builds and tests the package before publishing it
+with provenance. Make the repository public before publishing with provenance.
 
 Then on npmjs.com, open `@linqapp/convex` → Settings → **Trusted Publisher** → GitHub Actions:
 
@@ -49,16 +47,31 @@ Then on npmjs.com, open `@linqapp/convex` → Settings → **Trusted Publisher**
 | Organization/user | `linq-team`   |
 | Repository        | `linq-convex` |
 | Workflow filename | `publish.yml` |
-| Environment       | (empty)       |
+| Environment       | `npm-convex-release` |
+| Allowed actions   | `npm publish` (staged publishing is also allowed) |
+
+Validate the new publisher by making its first tokenless release within npm's validation
+window. Then revoke the temporary token and delete the environment's `NPM_TOKEN`. Normal
+releases leave `bootstrap_with_token` disabled. Do not add repository-wide npm credentials.
 
 On the same page, set **Publishing access** to require 2FA and disallow tokens, so only the
 workflow can publish. Renaming or moving `publish.yml` breaks publishing until this entry is
 updated.
 
-No npm token is stored in GitHub. Don't set `NODE_AUTH_TOKEN` on the publish step: it would
-shadow OIDC.
+The normal publish step uses OIDC with no npm token. Only the explicit first-release bootstrap
+path reads the environment-scoped token.
+
+## Recovering a partial release
+
+Rerun the workflow if npm succeeded but creating the tag or GitHub release failed. An existing
+npm version is checked for repository identity and source commit; that commit must be an
+ancestor of reviewed `main` and contain the same package name/version. Source and existing
+tag checks run before any publication. The workflow then independently repairs the tag
+and GitHub release. It refuses to reuse a tag that points to a different commit. A registry
+lookup failure other than 404 fails closed and never triggers a speculative publish.
 
 ## Publishing by hand
 
-Only if Actions is down or trusted publishing is misconfigured: run the one-time commands above
-with the new version, then `gh release create v<version> --generate-notes`.
+Prefer repairing the reviewed Actions workflow. An emergency manual release must preserve the
+reviewed source commit, package version, tests, and matching release tag; it will not have the
+same Actions provenance as the normal path.
