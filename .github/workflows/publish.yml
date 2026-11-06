@@ -1,0 +1,89 @@
+name: Publish
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+  workflow_dispatch:
+    inputs:
+      bootstrap_with_token:
+        description: First publication only; use the environment NPM_TOKEN
+        type: boolean
+        default: false
+concurrency:
+  group: publish
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    environment: npm-convex-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          # npm 12.2.2 requires Node 24.15.0+ on the Node 24 line.
+          node-version: '>=24.15.0 <25'
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: Resolve version and published source
+        id: version
+        run: node scripts/resolve-release.mjs
+      - name: Validate source and existing tag before publication
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          PKG: ${{ steps.version.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_SHA: ${{ steps.version.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "$RELEASE_SHA^{commit}"
+          git merge-base --is-ancestor "$RELEASE_SHA" "$GITHUB_SHA"
+          git show "$RELEASE_SHA:package.json" > "$RUNNER_TEMP/release-package.json"
+          node -e 'const p=require(process.env.RUNNER_TEMP+"/release-package.json"); if(p.name!==process.env.PKG||p.version!==process.env.VERSION) process.exit(1)'
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
+          fi
+      - if: steps.version.outputs.publish == 'true'
+        run: npm ci --ignore-scripts
+      - if: steps.version.outputs.publish == 'true'
+        run: rm -rf dist *.tsbuildinfo && npm run build
+      - if: steps.version.outputs.publish == 'true'
+        run: npm run typecheck && npm test
+      - if: steps.version.outputs.publish == 'true'
+        run: npm install -g npm@12.2.2 --ignore-scripts
+      - name: Publish with provenance
+        if: steps.version.outputs.publish == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.bootstrap_with_token && secrets.NPM_TOKEN || '' }}
+          BOOTSTRAP: ${{ inputs.bootstrap_with_token }}
+        run: |
+          if [ "$BOOTSTRAP" = true ] && [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo 'The first publish requires an environment-scoped NPM_TOKEN.' >&2
+            exit 1
+          fi
+          npm publish --access public --provenance --ignore-scripts
+      - name: Reconcile tag and GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PKG: ${{ steps.version.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_SHA: ${{ steps.version.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
+          else
+            git tag "$TAG" "$RELEASE_SHA"
+            git push origin "$TAG"
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$RELEASE_SHA" --title "$PKG@$VERSION" --generate-notes
+          fi

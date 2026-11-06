@@ -9,7 +9,8 @@ any webhook consumer. That makes it safe for zero-day-retention lines. See [Data
 
 - Verifies every webhook's Standard Webhooks signature before your code sees it.
 - Calls your handler in the webhook request. If the handler throws, Linq redelivers the event.
-- Sends with in-place retries under one idempotency key, so a retry never sends twice.
+- Sends with in-place retries under one idempotency key. Supply your own stable key to also
+  protect against caller retries and webhook redelivery.
 - Runs in Convex's default runtime; no `"use node"`.
 
 ## Install
@@ -120,6 +121,12 @@ Your handler runs inside the webhook request, and Linq waits **10 seconds** for 
 handler throws or runs longer, Linq redelivers the event, retrying for up to 30 minutes, and your
 handler runs again.
 
+The 10-second API timeout applies to each attempt, not to the entire handler. A send with all
+three attempts can take over 30 seconds; a webhook timeout does not cancel the running action.
+Keep handlers short and make every side effect safe to repeat, including during overlapping
+deliveries. Invalid local webhook-secret configuration returns 500 so deliveries can be retried
+after you fix it; an invalid request signature returns 401.
+
 - **Make replies safe to repeat.** Derive `idempotencyKey` from the message you are answering, as
   above. Linq sends each key at most once, so a redelivery cannot send the reply twice.
 - **Slow work** (a long LLM call, tools) that won't fit in 10 seconds has to leave the request. In
@@ -130,9 +137,13 @@ handler runs again.
 
 ## Send
 
+If you omit `idempotencyKey`, the helper generates a new random key for that call. It protects
+only that call's internal retries. A caller retry or redelivered webhook starts a new call and
+gets a new key, so supply a stable logical message/job key whenever a send may be repeated.
+
 ```ts
 // Into a chat you know
-await linq.sendMessage(ctx, { chatId, text: "your order shipped" });
+await linq.sendMessage(ctx, { chatId, text: "your order shipped", idempotencyKey: `order-${orderId}-shipped` });
 
 // Let Linq pick the line and reuse the right chat
 const { chatId, messageId, from } = await linq.sendMessage(ctx, {
@@ -142,12 +153,15 @@ const { chatId, messageId, from } = await linq.sendMessage(ctx, {
 });
 
 // Pin a line
-await linq.sendMessage(ctx, { from: "+18885550123", to: ["+15551234567"], text: "hi" });
+await linq.sendMessage(ctx, {
+  from: "+18885550123", to: ["+15551234567"], text: "hi", idempotencyKey: `welcome-${customerId}`,
+});
 
 // Full Linq message content: media, links, effects, replies
 await linq.sendMessage(ctx, {
   chatId,
   message: { parts: [{ type: "media", url: "https://example.com/receipt.png" }] },
+  idempotencyKey: `receipt-${orderId}`,
 });
 
 await linq.markRead(ctx, { chatId });
@@ -155,9 +169,12 @@ await linq.startTyping(ctx, { chatId }); // DMs only
 await linq.stopTyping(ctx, { chatId });
 ```
 
-All of these are action helpers (they make HTTP calls). Network errors, 408, 425, 429 and 5xx are
+All of these are action helpers (they make HTTP calls). Network errors, 408, 425, 429, 5xx, and
+409 error code 2009 (chat still being created) are
 retried after 0.5 s and 2 s with the same idempotency key, and each attempt has a 10-second deadline.
-Other errors, or a failure after the retries, throw.
+The client honors `Retry-After`; if it exceeds the five-second in-call wait budget, it throws
+instead of retrying early. Other errors, or a failure after the retries, throw. Preserve the same
+idempotency key when retrying an unknown send result.
 
 Delivery status (`message.delivered`, `message.read`, `message.failed`) arrives as webhook events at
 `onEvent`. The component doesn't record it; keep it yourself if you need it.
@@ -170,8 +187,9 @@ jobs, and it never logs message content.
 Where message data goes:
 
 - **Inbound:** Linq's webhook request, verified, then the arguments of your `onMessage` action, in
-  memory. On zero-day-retention lines Linq keeps no copy either, so that call is the only time the
-  content exists anywhere.
+  memory. Linq's zero-day-retention mode removes durable message content from its database, but
+  short-lived delivery copies and webhook retries can still contain it. See
+  [Linq's retention policy](https://docs.linqapp.com/channel/imessage/guides/platform/zero-day-retention/).
 - **Outbound:** the arguments of the component's send action, then Linq's API.
 - **Your code:** anything you write to your own tables or pass to `ctx.scheduler` is yours to keep
   or delete. The package never does it for you.
@@ -194,6 +212,8 @@ npm run dev        # local backend + codegen + build on change; example app in e
 npm test
 npm run typecheck
 ```
+
+Releases: see [RELEASING.md](RELEASING.md).
 
 ## License
 

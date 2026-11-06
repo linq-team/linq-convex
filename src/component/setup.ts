@@ -4,6 +4,7 @@
  */
 
 import { v } from "convex/values";
+import { Webhook } from "standardwebhooks";
 import { action, env } from "./_generated/server.js";
 import { linqRequest } from "./transport.js";
 
@@ -36,7 +37,18 @@ export const registerWebhook = action({
       },
     );
     if (!result.ok) throw new Error(`linq: webhook subscription failed: ${result.error}`);
-    const body = result.body as { id: string; signing_secret: string };
+    const body = result.body as { id?: unknown; signing_secret?: unknown } | null;
+    if (
+      !body || typeof body.id !== "string" || !body.id.trim() ||
+      typeof body.signing_secret !== "string" || !body.signing_secret.startsWith("whsec_")
+    ) {
+      throw new Error("linq: invalid webhook subscription response; check Linq subscriptions before retrying");
+    }
+    try {
+      new Webhook(body.signing_secret);
+    } catch {
+      throw new Error("linq: invalid webhook subscription response; check Linq subscriptions before retrying");
+    }
     return { subscriptionId: body.id, signingSecret: body.signing_secret, targetUrl: args.targetUrl };
   },
 });

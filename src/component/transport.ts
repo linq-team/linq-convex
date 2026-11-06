@@ -24,8 +24,18 @@ export interface Credentials {
   baseUrl?: string;
 }
 
-function retryableStatus(status: number): boolean {
-  return status === 408 || status === 425 || status === 429 || status >= 500;
+function errorCode(text: string): number | undefined {
+  try {
+    const code = JSON.parse(text)?.error?.code;
+    return typeof code === "number" && Number.isSafeInteger(code) ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function retryableStatus(status: number, code?: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500 ||
+    (status === 409 && code === 2009);
 }
 
 function retryAfterMs(header: string | null): number | undefined {
@@ -68,11 +78,12 @@ export async function linqRequest(
           return { ok: true, body: text };
         }
       }
+      const code = errorCode(text);
       return {
         ok: false,
-        retryable: retryableStatus(response.status),
+        retryable: retryableStatus(response.status, code),
         status: response.status,
-        error: `${response.status} ${text.slice(0, 500)}`.trim(),
+        error: `HTTP ${response.status}${code === undefined ? "" : ` (code ${code})`}`,
         retryAfterMs: retryAfterMs(response.headers.get("retry-after")),
       };
     };
@@ -85,11 +96,11 @@ export async function linqRequest(
         }, REQUEST_TIMEOUT_MS);
       }),
     ]);
-  } catch (e) {
+  } catch {
     return {
       ok: false,
       retryable: true,
-      error: `network error: ${e instanceof Error ? e.message : String(e)}`,
+      error: "request timed out or could not connect",
     };
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);

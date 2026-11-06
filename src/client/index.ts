@@ -140,11 +140,18 @@ export class Linq {
     const secret = this.options.webhookSecret ?? process.env.LINQ_WEBHOOK_SECRET;
     if (!secret) return new Response("LINQ_WEBHOOK_SECRET is not set", { status: 500 });
 
+    let verifier: Webhook;
+    try {
+      verifier = new Webhook(secret);
+    } catch {
+      return new Response("LINQ_WEBHOOK_SECRET is invalid", { status: 500 });
+    }
+
     const body = await request.text();
     const headers = Object.fromEntries(request.headers);
     let event: LinqWebhookEvent;
     try {
-      event = new Webhook(secret).verify(body, headers) as LinqWebhookEvent;
+      event = verifier.verify(body, headers) as LinqWebhookEvent;
     } catch {
       return new Response("invalid signature", { status: 401 });
     }
