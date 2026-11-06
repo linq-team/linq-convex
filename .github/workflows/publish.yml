@@ -28,7 +28,8 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 24
+          # npm 12.2.2 requires Node 24.15.0+ on the Node 24 line.
+          node-version: '>=24.15.0 <25'
           cache: npm
           registry-url: https://registry.npmjs.org
       - name: Resolve version and published source
@@ -50,13 +51,13 @@ jobs:
             test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
           fi
       - if: steps.version.outputs.publish == 'true'
-        run: npm ci
+        run: npm ci --ignore-scripts
       - if: steps.version.outputs.publish == 'true'
         run: rm -rf dist *.tsbuildinfo && npm run build
       - if: steps.version.outputs.publish == 'true'
         run: npm run typecheck && npm test
       - if: steps.version.outputs.publish == 'true'
-        run: npm install -g npm@11
+        run: npm install -g npm@12.2.2 --ignore-scripts
       - name: Publish with provenance
         if: steps.version.outputs.publish == 'true'
         env:

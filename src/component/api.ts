@@ -27,15 +27,24 @@ async function withRetries(attempt: () => Promise<CallResult>): Promise<unknown>
   for (let i = 0; ; i++) {
     const result = await attempt();
     if (result.ok) return result.body;
+    if (!result.retryable) throw new Error(`linq: ${result.error}`);
     if ((result.retryAfterMs ?? 0) > MAX_RETRY_AFTER_MS) {
       throw new Error(`linq: ${result.error}; retry after ${Math.ceil(result.retryAfterMs! / 1000)} seconds with the same idempotency key`);
     }
     const delay = RETRY_DELAYS_MS[i];
-    if (!result.retryable || delay === undefined) {
+    if (delay === undefined) {
       throw new Error(`linq: ${result.error}`);
     }
     await sleep(Math.max(delay, result.retryAfterMs ?? 0));
   }
+}
+
+/** Keep ids in one URL segment, including against URL dot-segment normalization. */
+function chatPathId(chatId: string): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(chatId)) {
+    throw new Error("linq: chatId is not a valid Linq identifier");
+  }
+  return encodeURIComponent(chatId);
 }
 
 /** Linq's ids from a send response (any of the three send endpoints). */
@@ -67,6 +76,7 @@ export const sendMessage = action({
     from: v.optional(v.string()),
   }),
   handler: async (_ctx, args) => {
+    const chatId = args.chatId === undefined ? undefined : chatPathId(args.chatId);
     if (!args.chatId && !args.to?.length) {
       throw new Error("linq: sendMessage needs a chatId or at least one recipient in to");
     }
@@ -74,7 +84,7 @@ export const sendMessage = action({
     const message = { ...(args.message as Record<string, unknown>), idempotency_key: args.idempotencyKey };
     const body = await withRetries(async () => {
       const result = await (args.chatId
-        ? linqRequest(creds, "POST", `/v3/chats/${encodeURIComponent(args.chatId)}/messages`, { message })
+        ? linqRequest(creds, "POST", `/v3/chats/${chatId}/messages`, { message })
         : args.from
           ? linqRequest(creds, "POST", "/v3/chats", { from: args.from, to: args.to, message })
           : linqRequest(creds, "POST", "/v3/messages", { to: args.to, message }));
@@ -97,8 +107,9 @@ export const chatAction = action({
   },
   returns: v.null(),
   handler: async (_ctx, { chatId, kind }) => {
+    const id = chatPathId(chatId);
     const creds = credentials();
-    const path = `/v3/chats/${encodeURIComponent(chatId)}/${kind === "read" ? "read" : "typing"}`;
+    const path = `/v3/chats/${id}/${kind === "read" ? "read" : "typing"}`;
     await withRetries(() => linqRequest(creds, kind === "stopTyping" ? "DELETE" : "POST", path));
     return null;
   },

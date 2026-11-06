@@ -80,6 +80,12 @@ const { api, internal, createTest } = app.defineModules({
           ? linq.sendMessage(ctx, { chatId: args.chatId, text: args.text })
           : linq.sendMessage(ctx, { from: args.from, to: [USER], text: args.text }),
     }),
+    subscribe: app.action({
+      args: {},
+      returns: v.any(),
+      handler: async (ctx): Promise<any> =>
+        linq.registerWebhook(ctx, { siteUrl: "https://example.convex.site" }),
+    }),
   },
   http: {
     default: (() => {
@@ -157,6 +163,46 @@ test("does not retry before a long Retry-After interval", async () => {
   expect(calls).toHaveLength(1);
 });
 
+test("a permanent failure with Retry-After does not advise retrying", async () => {
+  const t = createTest();
+  responses.push(() => new Response("private body", { status: 403, headers: { "Retry-After": "60" } }));
+  let failure: unknown;
+  try {
+    await t.action(api.outbound.send, { text: "hello" });
+  } catch (error) {
+    failure = error;
+  }
+  expect(String(failure)).toContain("403");
+  expect(String(failure)).not.toContain("retry after");
+  expect(calls).toHaveLength(1);
+});
+
+test.each([null, {}, { id: 1, signing_secret: SECRET }, { id: "sub-1", signing_secret: [] },
+  { id: "sub-1", signing_secret: "whsec_PRIVATE_INVALID!" }])(
+  "invalid subscription response fails safely before Convex return validation: %j", async (body) => {
+    const t = createTest();
+    responses.push(() => Response.json(body));
+    let failure: unknown;
+    try {
+      await t.action(api.outbound.subscribe, {});
+    } catch (error) {
+      failure = error;
+    }
+    expect(String(failure)).toContain("invalid webhook subscription response");
+    expect(String(failure)).not.toContain(SECRET);
+    expect(String(failure)).not.toContain("PRIVATE_INVALID");
+    expect(calls).toHaveLength(1);
+  },
+);
+
+test("a valid subscription returns its credentials", async () => {
+  const t = createTest();
+  responses.push(() => Response.json({ id: "sub-1", signing_secret: SECRET }));
+  await expect(t.action(api.outbound.subscribe, {})).resolves.toMatchObject({
+    subscriptionId: "sub-1", signingSecret: SECRET,
+  });
+});
+
 test("retries a provisioning conflict without changing the send key", async () => {
   const t = createTest();
   responses.push(() => Response.json({ error: { code: 2009 } }, { status: 409 }));
@@ -182,6 +228,15 @@ test("never acknowledges a send when all successful responses are malformed", as
 });
 
 describe("webhook", () => {
+  test.each(["whsec_", "whsec_INVALID!SECRET"])("invalid local signing secret returns a safe retriable error: %s", async (secret) => {
+    linq = new Linq(app.components.linq as any, { onMessage: internal.bot.reply, webhookSecret: secret });
+    const res = await deliver(createTest(), "message.received", inbound("m1", "hi"));
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe("LINQ_WEBHOOK_SECRET is invalid");
+    expect(seen).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
   test("rejects a forged signature and runs nothing", async () => {
     const t = createTest();
     const res = await deliver(t, "message.received", inbound("m1", "hi"), "evt-1", `whsec_${btoa("some-other-secret-value-xyz")}`);
@@ -267,6 +322,17 @@ describe("stores nothing", () => {
 });
 
 describe("sending", () => {
+  test.each([".", "..", "../messages", "%2e%2e", "a/b", "a?b", "a#b", ""])(
+    "unsafe chat id never reaches the network: %s", async (chatId) => {
+      const t = createTest();
+      await expect(t.action(async (ctx: any) => linq.sendMessage(ctx, { chatId, text: "hello" })))
+        .rejects.toThrow("chatId is not a valid Linq identifier");
+      await expect(t.action(async (ctx: any) => linq.markRead(ctx, { chatId })))
+        .rejects.toThrow("chatId is not a valid Linq identifier");
+      expect(calls).toEqual([]);
+    },
+  );
+
   test("retries a transient failure in place with one idempotency key", async () => {
     const t = createTest();
     responses.push(() => new Response("busy", { status: 503 }));
