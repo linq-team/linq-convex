@@ -1,0 +1,96 @@
+name: Publish
+
+# Publishing is driven by the version in package.json. Bump it in a PR (the
+# Version Packages PR does this); merging that PR to main publishes the package
+# if that version is not on npm yet, tags the commit, and cuts a GitHub release.
+# See RELEASING.md.
+on:
+  push:
+    branches: [main]
+    paths:
+      - package.json
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write # OIDC token for npm trusted publishing (and provenance)
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$name@$version is not on npm; publishing."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.version.outputs.publish == 'true'
+        run: npm ci
+
+      # A clean build, so a publish never ships a stale or missing dist.
+      - if: steps.version.outputs.publish == 'true'
+        run: rm -rf dist *.tsbuildinfo && npm run build
+
+      - if: steps.version.outputs.publish == 'true'
+        run: npm run typecheck
+
+      - if: steps.version.outputs.publish == 'true'
+        run: npm test
+
+      # Trusted publishing needs npm >= 11.5.1.
+      - name: Ensure npm supports trusted publishing
+        if: steps.version.outputs.publish == 'true'
+        run: npm install -g npm@latest
+
+      # Authenticates over OIDC via the trusted publisher configured on npm; no
+      # NODE_AUTH_TOKEN, which would shadow it. Provenance is automatic.
+      - name: Publish to npm
+        if: steps.version.outputs.publish == 'true'
+        run: npm publish --access public
+
+      - name: Tag and release
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PKG: ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists; skipping."
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping."
+          else
+            gh release create "$TAG" --title "$PKG" --generate-notes
+          fi

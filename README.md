@@ -195,6 +195,8 @@ npm test
 npm run typecheck
 ```
 
+Releases: see [RELEASING.md](RELEASING.md).
+
 ## License
 
 Apache-2.0
