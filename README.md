@@ -13,6 +13,21 @@ any webhook consumer. That makes it safe for zero-day-retention lines. See [Data
   protect against caller retries and webhook redelivery.
 - Runs in Convex's default runtime; no `"use node"`.
 
+## How a message moves through the component
+
+Linq posts an event to your Convex HTTP route. The route checks its signature, calls your
+configured action, and responds after that action finishes. A reply calls Linq's API with a
+stable idempotency key. The component does not create an inbox, outbox, or scheduled worker.
+
+| Your application needs | Where to handle it |
+| --- | --- |
+| A quick reply or notification | Use the action helpers below. Keep webhook handlers within the response deadline. |
+| Conversation history or delivery tracking | Store the fields you need in your own app, subject to your retention requirements. |
+| Message batching, cancellation, or a slow agent | Implement that policy in your app. Scheduling message content persists it in Convex. |
+
+See the [complete example app](./example), including webhook setup, an echo handler, and
+outbound sends. The sections below explain the same setup step by step.
+
 ## Install
 
 ```sh
@@ -126,6 +141,13 @@ three attempts can take over 30 seconds; a webhook timeout does not cancel the r
 Keep handlers short and make every side effect safe to repeat, including during overlapping
 deliveries. Invalid local webhook-secret configuration returns 500 so deliveries can be retried
 after you fix it; an invalid request signature returns 401.
+
+| Webhook outcome | HTTP response |
+| --- | --- |
+| Missing or invalid local signing secret | `500`; fix the deployment configuration. |
+| Invalid signature or expired signature timestamp | `401`; no handler runs. |
+| A selected handler completes, or no handler is selected for the event | `200`. |
+| A selected handler throws | `500`; Linq can redeliver the event. |
 
 - **Make replies safe to repeat.** Derive `idempotencyKey` from the message you are answering, as
   above. Linq sends each key at most once, so a redelivery cannot send the reply twice.
